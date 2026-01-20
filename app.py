@@ -91,7 +91,7 @@ def get_analysis(symbol):
         """
         
         # MODEL VE GÜVENLİK AYARLARI (Sorunu çözen kısım burası)
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('gemini-3-flash-preview')
         
         safe = [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
