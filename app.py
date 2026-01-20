@@ -83,7 +83,7 @@ def get_analysis(symbol):
         4. **YATIRIMCI ÖZETİ:** (Kısa, Orta ve Uzun vade için net bir cümle)
         """
         
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('gemini-2.0-flash')
         response = model.generate_content(prompt)
         
         return hist, info, response.text
