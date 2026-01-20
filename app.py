@@ -410,17 +410,239 @@ def get_advanced_data(symbol):
         return None
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 3.5 HAFTALIK VERİ (Multi-Timeframe)
+# ═══════════════════════════════════════════════════════════════════════════════
+@st.cache_data(ttl=300)
+def get_weekly_trend(symbol):
+    """Haftalık zaman diliminde trend analizi"""
+    try:
+        ticker = yf.Ticker(symbol)
+        weekly = ticker.history(period="2y", interval="1wk")
+        
+        if weekly.empty or len(weekly) < 20:
+            return None
+        
+        # EMA hesaplamaları
+        weekly['EMA20'] = weekly['Close'].ewm(span=20, adjust=False).mean()
+        weekly['EMA50'] = weekly['Close'].ewm(span=50, adjust=False).mean()
+        
+        curr = weekly.iloc[-1]
+        prev = weekly.iloc[-2]
+        
+        # Haftalık trend
+        weekly_trend = "YUKARI" if curr['Close'] > curr['EMA20'] else "AŞAĞI"
+        weekly_ema_cross = "BOĞA" if curr['EMA20'] > curr['EMA50'] else "AYI"
+        
+        # Haftalık değişim
+        weekly_change = ((curr['Close'] - prev['Close']) / prev['Close']) * 100
+        
+        # Haftalık destek/direnç
+        recent_20 = weekly.tail(20)
+        weekly_support = recent_20['Low'].min()
+        weekly_resistance = recent_20['High'].max()
+        
+        return {
+            "trend": weekly_trend,
+            "ema_cross": weekly_ema_cross,
+            "change": weekly_change,
+            "support": weekly_support,
+            "resistance": weekly_resistance,
+            "price": curr['Close'],
+            "ema20": curr['EMA20'],
+            "ema50": curr['EMA50'],
+        }
+    except:
+        return None
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3.6 BACKTEST MOTORU
+# ═══════════════════════════════════════════════════════════════════════════════
+@st.cache_data(ttl=600)
+def run_backtest(symbol, years=2):
+    """
+    Geriye dönük test - strateji performansını ölç
+    ATR tabanlı stop-loss ve take-profit ile
+    """
+    try:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period=f"{years}y")
+        
+        if df.empty or len(df) < 200:
+            return None
+        
+        # İndikatörleri hesapla
+        # EMA
+        df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+        df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
+        
+        # RSI
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+        
+        # ATR
+        high_low = df['High'] - df['Low']
+        high_close = np.abs(df['High'] - df['Close'].shift())
+        low_close = np.abs(df['Low'] - df['Close'].shift())
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df['ATR'] = tr.rolling(window=14).mean()
+        
+        # ADX
+        plus_dm = df['High'].diff()
+        minus_dm = df['Low'].diff()
+        plus_dm[plus_dm < 0] = 0
+        minus_dm[minus_dm > 0] = 0
+        tr14 = tr.rolling(window=14).sum()
+        plus_di = 100 * (plus_dm.rolling(window=14).sum() / tr14)
+        minus_di = 100 * (np.abs(minus_dm).rolling(window=14).sum() / tr14)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        df['ADX'] = dx.rolling(window=14).mean()
+        
+        # CMF
+        mfv = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / (df['High'] - df['Low'])
+        mfv = mfv.fillna(0)
+        volume_mfv = mfv * df['Volume']
+        df['CMF'] = volume_mfv.rolling(20).sum() / df['Volume'].rolling(20).sum()
+        
+        # MACD
+        df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean()
+        df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = df['EMA12'] - df['EMA26']
+        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        
+        # NaN temizle
+        df = df.dropna()
+        
+        # Backtest
+        trades = []
+        position = None
+        
+        for i in range(len(df) - 10):  # Son 10 günü test için bırak
+            row = df.iloc[i]
+            
+            if position is None:
+                # AL sinyali kontrol
+                score = 0
+                
+                # Trend
+                if row['Close'] > row['EMA200']:
+                    if row['ADX'] > 25:
+                        score += 25
+                    elif row['ADX'] > 20:
+                        score += 15
+                    else:
+                        score += 5
+                else:
+                    continue  # Düşüş trendinde işlem yapma
+                
+                # RSI Pullback
+                if row['RSI'] < 40:
+                    score += 20
+                
+                # CMF
+                if row['CMF'] > 0.05:
+                    score += 15
+                
+                # MACD
+                if row['MACD'] > row['MACD_Signal']:
+                    score += 10
+                
+                final_score = 50 + score
+                
+                # AL sinyali (skor >= 60)
+                if final_score >= 60:
+                    entry_price = row['Close']
+                    atr = row['ATR']
+                    stop_loss = entry_price - (2 * atr)
+                    take_profit = entry_price + (2 * atr)  # 1:1 R/R
+                    
+                    position = {
+                        "entry_date": df.index[i],
+                        "entry_price": entry_price,
+                        "stop_loss": stop_loss,
+                        "take_profit": take_profit,
+                        "score": final_score
+                    }
+            else:
+                # Pozisyon var, çıkış kontrol
+                current_price = row['Close']
+                
+                if current_price <= position['stop_loss']:
+                    # Stop loss
+                    pnl = ((current_price - position['entry_price']) / position['entry_price']) * 100
+                    trades.append({
+                        "entry_date": position['entry_date'],
+                        "exit_date": df.index[i],
+                        "entry_price": position['entry_price'],
+                        "exit_price": current_price,
+                        "pnl": pnl,
+                        "result": "ZARAR",
+                        "score": position['score']
+                    })
+                    position = None
+                    
+                elif current_price >= position['take_profit']:
+                    # Take profit
+                    pnl = ((current_price - position['entry_price']) / position['entry_price']) * 100
+                    trades.append({
+                        "entry_date": position['entry_date'],
+                        "exit_date": df.index[i],
+                        "entry_price": position['entry_price'],
+                        "exit_price": current_price,
+                        "pnl": pnl,
+                        "result": "KAR",
+                        "score": position['score']
+                    })
+                    position = None
+        
+        if len(trades) == 0:
+            return {"total_trades": 0, "win_rate": 0, "avg_pnl": 0, "trades": []}
+        
+        # İstatistikler
+        wins = len([t for t in trades if t['result'] == "KAR"])
+        total = len(trades)
+        win_rate = (wins / total) * 100
+        avg_pnl = sum([t['pnl'] for t in trades]) / total
+        total_pnl = sum([t['pnl'] for t in trades])
+        
+        return {
+            "total_trades": total,
+            "wins": wins,
+            "losses": total - wins,
+            "win_rate": win_rate,
+            "avg_pnl": avg_pnl,
+            "total_pnl": total_pnl,
+            "trades": trades[-10:]  # Son 10 işlem
+        }
+    except Exception as e:
+        return None
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 4. SİNYAL SKOR HESAPLAMA
 # ═══════════════════════════════════════════════════════════════════════════════
-def calculate_smart_score(data):
+def calculate_smart_score(data, weekly_data=None):
     """
-    SNIPER STRATEJİSİ v2:
+    SNIPER STRATEJİSİ v3:
     - ADX filtresi ile yatay piyasada sinyal vermez
     - ATR ile dinamik stop-loss ve kar al seviyeleri
+    - Haftalık trend teyidi ile çoklu zaman dilimi analizi
     - Trend + Momentum + Akıllı Para kombinasyonu
     """
     score = 0
     reasons = []
+    
+    # ═══ HAFTALIK TEYİT (Multi-Timeframe) ═══
+    weekly_aligned = True
+    if weekly_data:
+        if weekly_data['ema_cross'] == "BOĞA":
+            score += 10
+            reasons.append("Haftalık Trend BOĞA (+10)")
+        else:
+            score -= 10
+            reasons.append("Haftalık Trend AYI (-10)")
+            weekly_aligned = False
     
     # ═══ ADX TREND GÜCÜ FİLTRESİ ═══
     # ADX < 20: Trend yok, yatay piyasa - sinyallere güvenme
@@ -730,22 +952,49 @@ with col2:
 if analyze_btn:
     with st.spinner(""):
         data = get_advanced_data(symbol.upper().strip())
+        weekly_data = get_weekly_trend(symbol.upper().strip())
+        backtest_results = run_backtest(symbol.upper().strip())
     
     if data:
-        # ═══ SİNYAL SKORU (SNIPER ALGORİTMASI v2) ═══
-        score, signal, signal_color, reasons, risk_levels = calculate_smart_score(data)
+        # ═══ SİNYAL SKORU (SNIPER ALGORİTMASI v3 - Multi-Timeframe) ═══
+        score, signal, signal_color, reasons, risk_levels = calculate_smart_score(data, weekly_data)
         
         # Karar Paneli
         pulse_class = "pulse-active" if score >= 75 or score <= 25 else ""
         
-        # Reasons HTML (ilk 4 reason)
-        reasons_display = reasons[:4] if len(reasons) > 4 else reasons
+        # Reasons HTML (ilk 5 reason)
+        reasons_display = reasons[:5] if len(reasons) > 5 else reasons
         reasons_html = " · ".join(reasons_display) if reasons_display else ""
         
         # Risk seviyeleri
         sl = risk_levels['stop_loss']
         tp1 = risk_levels['take_profit_1']
         tp2 = risk_levels['take_profit_2']
+        
+        # Backtest bilgisi
+        bt_html = ""
+        if backtest_results and backtest_results['total_trades'] > 0:
+            wr = backtest_results['win_rate']
+            wr_color = "#10b981" if wr >= 50 else "#ef4444"
+            bt_html = f'''
+            <div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.06);">
+                <div style="font-size: 0.6rem; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1px; text-align: center; margin-bottom: 0.5rem;">2 Yıllık Backtest</div>
+                <div style="display: flex; justify-content: center; gap: 1.5rem;">
+                    <div style="text-align: center;">
+                        <div style="font-size: 0.5rem; color: rgba(255,255,255,0.3);">İşlem</div>
+                        <div style="font-size: 0.9rem; color: white;">{backtest_results["total_trades"]}</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="font-size: 0.5rem; color: rgba(255,255,255,0.3);">Kazanma</div>
+                        <div style="font-size: 0.9rem; color: {wr_color};">%{wr:.0f}</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="font-size: 0.5rem; color: rgba(255,255,255,0.3);">Toplam P/L</div>
+                        <div style="font-size: 0.9rem; color: {"#10b981" if backtest_results["total_pnl"] > 0 else "#ef4444"};">%{backtest_results["total_pnl"]:.1f}</div>
+                    </div>
+                </div>
+            </div>
+            '''
         
         st.markdown(f'''
         <div class="decision-panel {pulse_class}" style="--signal-color: {signal_color};">
@@ -779,6 +1028,7 @@ if analyze_btn:
                     <div style="font-size: 1rem; color: #10b981; font-weight: 600;">{tp2:.2f} ₺</div>
                 </div>
             </div>
+            {bt_html}
         </div>
         ''', unsafe_allow_html=True)
         
