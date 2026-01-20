@@ -980,60 +980,52 @@ if analyze_btn:
             wr_color = "#10b981" if wr >= 50 else "#ef4444"
             pnl_color = "#10b981" if total_pnl > 0 else "#ef4444"
             bt_html = f'''
-            <div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.06);">
-                <div style="font-size: 0.6rem; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1px; text-align: center; margin-bottom: 0.5rem;">2 Yıllık Backtest</div>
-                <div style="display: flex; justify-content: center; gap: 1.5rem;">
-                    <div style="text-align: center;">
-                        <div style="font-size: 0.5rem; color: rgba(255,255,255,0.3);">İşlem</div>
-                        <div style="font-size: 0.9rem; color: white;">{total_trades}</div>
-                    </div>
-                    <div style="text-align: center;">
-                        <div style="font-size: 0.5rem; color: rgba(255,255,255,0.3);">Kazanma</div>
-                        <div style="font-size: 0.9rem; color: {wr_color};">%{wr:.0f}</div>
-                    </div>
-                    <div style="text-align: center;">
-                        <div style="font-size: 0.5rem; color: rgba(255,255,255,0.3);">Toplam P/L</div>
-                        <div style="font-size: 0.9rem; color: {pnl_color};">%{total_pnl:.1f}</div>
-                    </div>
-                </div>
-            </div>
-            '''
+<div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.06);">
+<div style="font-size: 0.6rem; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1px; text-align: center; margin-bottom: 0.5rem;">2 Yıllık Backtest</div>
+<div style="display: flex; justify-content: center; gap: 1.5rem;">
+<div style="text-align: center;">
+<div style="font-size: 0.5rem; color: rgba(255,255,255,0.3);">İşlem</div>
+<div style="font-size: 0.9rem; color: white;">{total_trades}</div>
+</div>
+<div style="text-align: center;">
+<div style="font-size: 0.5rem; color: rgba(255,255,255,0.3);">Kazanma</div>
+<div style="font-size: 0.9rem; color: {wr_color};">%{wr:.0f}</div>
+</div>
+<div style="text-align: center;">
+<div style="font-size: 0.5rem; color: rgba(255,255,255,0.3);">Toplam P/L</div>
+<div style="font-size: 0.9rem; color: {pnl_color};">%{total_pnl:.1f}</div>
+</div>
+</div>
+</div>'''
         
         st.markdown(f'''
-        <div class="decision-panel {pulse_class}" style="--signal-color: {signal_color};">
-            <div class="signal-label">Sinyal</div>
-            <div class="signal-value" style="color: {signal_color};">{signal}</div>
-            <div class="signal-score">Güç: {score}/100</div>
-            <div class="score-bar-container">
-                <div class="score-bar-fill" style="width: {score}%; background: {signal_color};"></div>
-            </div>
-            <div style="margin-top: 1rem; font-size: 0.7rem; color: rgba(255,255,255,0.4); letter-spacing: 0.5px;">
-                {reasons_html}
-            </div>
-            <div style="
-                display: flex; 
-                justify-content: center; 
-                gap: 2rem; 
-                margin-top: 1.5rem; 
-                padding-top: 1rem; 
-                border-top: 1px solid rgba(255,255,255,0.06);
-            ">
-                <div style="text-align: center;">
-                    <div style="font-size: 0.6rem; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1px;">Stop Loss</div>
-                    <div style="font-size: 1rem; color: #ef4444; font-weight: 600;">{sl:.2f} ₺</div>
-                </div>
-                <div style="text-align: center;">
-                    <div style="font-size: 0.6rem; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1px;">Hedef 1</div>
-                    <div style="font-size: 1rem; color: #10b981; font-weight: 600;">{tp1:.2f} ₺</div>
-                </div>
-                <div style="text-align: center;">
-                    <div style="font-size: 0.6rem; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1px;">Hedef 2</div>
-                    <div style="font-size: 1rem; color: #10b981; font-weight: 600;">{tp2:.2f} ₺</div>
-                </div>
-            </div>
-            {bt_html}
-        </div>
-        ''', unsafe_allow_html=True)
+<div class="decision-panel {pulse_class}" style="--signal-color: {signal_color};">
+<div class="signal-label">Sinyal</div>
+<div class="signal-value" style="color: {signal_color};">{signal}</div>
+<div class="signal-score">Güç: {score}/100</div>
+<div class="score-bar-container">
+<div class="score-bar-fill" style="width: {score}%; background: {signal_color};"></div>
+</div>
+<div style="margin-top: 1rem; font-size: 0.7rem; color: rgba(255,255,255,0.4); letter-spacing: 0.5px;">
+{reasons_html}
+</div>
+<div style="display: flex; justify-content: center; gap: 2rem; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid rgba(255,255,255,0.06);">
+<div style="text-align: center;">
+<div style="font-size: 0.6rem; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1px;">Stop Loss</div>
+<div style="font-size: 1rem; color: #ef4444; font-weight: 600;">{sl:.2f} ₺</div>
+</div>
+<div style="text-align: center;">
+<div style="font-size: 0.6rem; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1px;">Hedef 1</div>
+<div style="font-size: 1rem; color: #10b981; font-weight: 600;">{tp1:.2f} ₺</div>
+</div>
+<div style="text-align: center;">
+<div style="font-size: 0.6rem; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1px;">Hedef 2</div>
+<div style="font-size: 1rem; color: #10b981; font-weight: 600;">{tp2:.2f} ₺</div>
+</div>
+</div>
+{bt_html}
+</div>
+''', unsafe_allow_html=True)
         
         # ═══ ANA METRİKLER ═══
         st.markdown('<div class="section-title">Temel Göstergeler</div>', unsafe_allow_html=True)
