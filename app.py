@@ -1,84 +1,96 @@
 import streamlit as st
 import yfinance as yf
-import pandas as pd
 import google.generativeai as genai
 import plotly.graph_objects as go
 
-# --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Borsa Analiz Projesi", layout="wide")
-st.title("📈 Borsa Veri Analiz Simülasyonu")
+# --- AYARLAR ---
+st.set_page_config(page_title="AI Sinyal v3.0", layout="wide")
+st.title("🤖 AI Teknik Analiz Sinyal Üretici (Phantom Mod)")
 
 # --- SIDEBAR ---
-st.sidebar.header("Kontrol Paneli")
-symbol_input = st.sidebar.text_input("Hisse Kodu (Örn: GARAN.IS)", value="GARAN.IS")
-analyze_button = st.sidebar.button("Verileri Getir")
+st.sidebar.header("Ayarlar")
+symbol_input = st.sidebar.text_input("Hisse Kodu (Örn: THYAO.IS)", value="THYAO.IS")
+analyze_button = st.sidebar.button("Sinyal Üret")
 
-# API Key
+# API KEY
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 else:
-    st.error("API Key Eksik! Streamlit Secrets ayarlarını yapın.")
+    st.error("API Key Eksik! Streamlit Secrets ayarlarını kontrol et.")
     st.stop()
 
-# --- 1. VERİ ÇEKME FONKSİYONU ---
-@st.cache_data(ttl=300) # 5 dk önbellek
-def get_data(symbol):
+# --- VERİ ÇEKME VE İŞLEME ---
+@st.cache_data(ttl=300)
+def get_technical_data(symbol):
     try:
         ticker = yf.Ticker(symbol)
-        hist = ticker.history(period="3mo") # Veriyi azalttık (Hız için)
-        
-        if hist.empty:
-            return None, None, "Hisse bulunamadı. Sonuna .IS eklediniz mi?"
+        # Veriyi çek
+        hist = ticker.history(period="6mo")
+        if hist.empty: return None, "Veri Yok"
 
-        # Teknik Hesaplamalar (Basitleştirilmiş)
-        # RSI
+        # --- PYTHON İLE HESAPLAMALAR (AI'a bırakmıyoruz) ---
+        # 1. RSI
         delta = hist['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         hist['RSI'] = 100 - (100 / (1 + rs))
         
-        # Hareketli Ortalama (50 Günlük)
+        # 2. Hareketli Ortalamalar
         hist['SMA50'] = hist['Close'].rolling(window=50).mean()
+        hist['SMA200'] = hist['Close'].rolling(window=200).mean()
         
-        info = ticker.info
+        # Son Veriler
+        current_price = hist['Close'].iloc[-1]
+        current_rsi = hist['RSI'].iloc[-1]
+        sma50 = hist['SMA50'].iloc[-1]
+        sma200 = hist['SMA200'].iloc[-1]
         
-        # Haber Başlıkları
-        news = ""
-        if ticker.news:
-            for n in ticker.news[:3]:
-                news += f"- {n.get('title', '')}\n"
+        # Trend Tespiti
+        trend_durumu = "YÜKSELİŞ" if current_price > sma200 else "DÜŞÜŞ"
+        rsi_durumu = "AŞIRI SATIM (UCUZ)" if current_rsi < 30 else ("AŞIRI ALIM (PAHALI)" if current_rsi > 70 else "NÖTR")
         
-        return hist, info, news
+        return {
+            "hist": hist,
+            "price": current_price,
+            "rsi": current_rsi,
+            "sma50": sma50,
+            "sma200": sma200,
+            "trend": trend_durumu,
+            "rsi_status": rsi_durumu
+        }, None
+        
     except Exception as e:
-        return None, None, str(e)
+        return None, str(e)
 
-# --- 2. AI YORUM FONKSİYONU (GÜVENLİ) ---
-def get_ai_analysis(symbol, price, rsi, trend, news):
-    # Prompt'u "Eğitim" kılıfına sokuyoruz
+# --- AI ANALİZ (ANONİM VARLIK YÖNTEMİ) ---
+def get_ai_signal(data):
+    # BURASI ÇOK ÖNEMLİ: Hisse adını göndermiyoruz. "Varlık X" diyoruz.
     prompt = f"""
-    Rol yap: Sen bir üniversitede finans dersi veren bir profesörsün.
-    Ben de senin öğrencinim. Aşağıdaki borsa verilerini kullanarak bana teknik analizin nasıl yorumlanacağını öğret.
+    Sen bir matematik ve istatistik uzmanısın.
+    Aşağıda ismini gizlediğimiz bir finansal varlığın (VARLIK X) teknik verileri var.
     
-    UYARI: Asla doğrudan "Al" veya "Sat" deme. Sadece verilerin ne anlama geldiğini anlat.
-    Amaç tamamen eğitimdir.
+    VERİ SETİ:
+    - Güncel Fiyat: {data['price']:.2f}
+    - RSI (Güç Endeksi): {data['rsi']:.2f}
+    - RSI Durumu: {data['rsi_status']}
+    - 50 Günlük Ortalama: {data['sma50']:.2f} (Fiyat bunun {'üstünde' if data['price'] > data['sma50'] else 'altında'})
+    - 200 Günlük Ortalama: {data['sma200']:.2f} (Fiyat bunun {'üstünde' if data['price'] > data['sma200'] else 'altında'})
     
-    VERİLER:
-    - Hisse: {symbol}
-    - Fiyat: {price:.2f}
-    - RSI: {rsi:.2f}
-    - Trend Durumu: {trend}
-    - Haberler: {news}
+    GÖREVİN:
+    Bu matematiksel tabloyu teknik analiz literatürüne göre yorumla.
+    Duygulardan arınmış, tamamen teknik bir çıkarım yap.
     
-    AÇIKLAMA PLANIN:
-    1. Teknik Göstergeler ne anlatıyor? (Aşırı alım/satım var mı?)
-    2. Temel haberler fiyatı nasıl etkileyebilir?
-    3. Teorik olarak bir yatırımcı bu tabloda nelere dikkat etmeli?
+    ÇIKTI FORMATI (Aynen bu formatı kullan):
+    KARAR: [POZİTİF / NEGATİF / NÖTR]
+    GÜVEN SKORU: [10 üzerinden bir puan ver]
+    NEDEN: [Teknik gerekçeni 2 cümlede açıkla]
+    STRATEJİ: [Destek/Direnç mantığına göre kısa bir cümle]
     """
     
-    model = genai.GenerativeModel('gemini-3-flash-preview')
+    model = genai.GenerativeModel('gemini-3-pro-preview')
     
-    # Tüm güvenlik filtrelerini kapatıyoruz
+    # Filtreleri Kapat
     safe = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -88,49 +100,53 @@ def get_ai_analysis(symbol, price, rsi, trend, news):
     
     try:
         response = model.generate_content(prompt, safety_settings=safe)
-        
-        # HATA YAKALAYICI: Cevap boş mu kontrol et
-        if response.candidates and response.candidates[0].content.parts:
-            return response.text
-        else:
-            return "⚠️ Yapay zeka bu hisse için yorum yapmaktan kaçındı (Finansal Filtre). Başka bir hisse deneyin."
-            
+        return response.text
     except Exception as e:
-        return f"Bağlantı Hatası: {str(e)}"
+        return "AI Bağlantı Hatası."
 
-# --- 3. ANA EKRAN ---
+# --- ARAYÜZ ---
 if analyze_button:
-    with st.spinner('Veriler analiz ediliyor...'):
-        hist, info, news = get_data(symbol_input)
+    with st.spinner('Piyasa verileri taranıyor...'):
+        data, error = get_technical_data(symbol_input)
         
-    if hist is not None:
-        last_price = hist['Close'].iloc[-1]
-        last_rsi = hist['RSI'].iloc[-1]
-        sma50 = hist['SMA50'].iloc[-1]
+    if data:
+        # 1. Grafik Alanı
+        st.subheader(f"{symbol_input} Teknik Görünüm")
         
-        # Trend Hesabı
-        trend = "Yükseliş Trendi (Fiyat > 50 Günlük Ort)" if last_price > sma50 else "Düşüş Trendi (Fiyat < 50 Günlük Ort)"
-        
-        # Görselleştirme
-        col1, col2 = st.columns(2)
-        col1.metric("Son Fiyat", f"{last_price:.2f} TL")
-        col2.metric("RSI (Güç)", f"{last_rsi:.2f}")
-        
-        st.write(f"**Sektör:** {info.get('sector', 'Belirsiz')}")
-        
-        # Grafik
+        # Grafik Çizimi
         fig = go.Figure()
-        fig.add_trace(go.Candlestick(x=hist.index,
-                        open=hist['Open'], high=hist['High'],
-                        low=hist['Low'], close=hist['Close'], name='Fiyat'))
-        fig.update_layout(height=350, margin=dict(l=0,r=0,t=20,b=0))
+        fig.add_trace(go.Candlestick(x=data['hist'].index,
+                        open=data['hist']['Open'], high=data['hist']['High'],
+                        low=data['hist']['Low'], close=data['hist']['Close'], name='Fiyat'))
+        # Ortalamaları da çizelim ki görsel olsun
+        fig.add_trace(go.Scatter(x=data['hist'].index, y=data['hist']['SMA50'], line=dict(color='orange', width=1), name='50 Günlük'))
+        fig.update_layout(height=400, margin=dict(l=0,r=0,t=0,b=0))
         st.plotly_chart(fig, use_container_width=True)
         
-        # AI Analizi Çağır
-        st.subheader("🎓 Prof. AI Analizi")
-        with st.spinner('Profesör notları hazırlıyor...'):
-            comment = get_ai_analysis(symbol_input, last_price, last_rsi, trend, news)
-            st.info(comment)
+        # 2. Göstergeler
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Fiyat", f"{data['price']:.2f}")
+        c2.metric("RSI", f"{data['rsi']:.2f}")
+        c3.metric("Trend", data['trend'])
+        
+        # Renge göre RSI durumu
+        rsi_color = "red" if data['rsi'] > 70 else ("green" if data['rsi'] < 30 else "gray")
+        c4.markdown(f"**RSI Durumu:** :{rsi_color}[{data['rsi_status']}]")
+        
+        # 3. AI SİNYAL KUTUSU
+        st.markdown("---")
+        st.subheader("⚡ AI Sinyal Raporu")
+        
+        with st.spinner('Algoritma hesaplıyor...'):
+            ai_result = get_ai_signal(data)
             
+            # Sonucu güzel bir kutu içinde gösterelim
+            if "POZİTİF" in ai_result:
+                st.success(ai_result)
+            elif "NEGATİF" in ai_result:
+                st.error(ai_result)
+            else:
+                st.warning(ai_result)
+                
     else:
-        st.error(f"Veri alınamadı: {news}")
+        st.error(f"Hata: {error}")
