@@ -321,6 +321,16 @@ def get_advanced_data(symbol):
         df['Volume_SMA20'] = df['Volume'].rolling(window=20).mean()
         df['Volume_Ratio'] = df['Volume'] / df['Volume_SMA20']
         
+        # ─── AKILLI PARA GÖSTERGESİ (Chaikin Money Flow - CMF) ───
+        mfv = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / (df['High'] - df['Low'])
+        mfv = mfv.fillna(0)
+        volume_mfv = mfv * df['Volume']
+        df['CMF'] = volume_mfv.rolling(20).sum() / df['Volume'].rolling(20).sum()
+        
+        # ─── TREND FİLTRESİ (EMA Cloud) ───
+        df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
+        df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+        
         # ─── Destek ve Direnç Seviyeleri ───
         recent = df.tail(60)
         support = recent['Low'].min()
@@ -362,6 +372,11 @@ def get_advanced_data(symbol):
             "sma20": curr['SMA20'],
             "sma50": curr['SMA50'],
             "sma200": curr['SMA200'],
+            # EMA
+            "ema50": curr['EMA50'],
+            "ema200": curr['EMA200'],
+            # CMF
+            "cmf": curr['CMF'],
             # MACD
             "macd": curr['MACD'],
             "macd_signal": curr['MACD_Signal'],
@@ -397,76 +412,91 @@ def get_advanced_data(symbol):
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. SİNYAL SKOR HESAPLAMA
 # ═══════════════════════════════════════════════════════════════════════════════
-def calculate_signal_score(data):
-    """Teknik verilere göre 0-100 arası sinyal skoru hesapla"""
-    score = 50  # Başlangıç nötr
-    
-    # RSI Katkısı (-15 / +15)
-    if data['rsi'] < 30:
-        score += 15  # Aşırı satım = Alım fırsatı
-    elif data['rsi'] < 40:
-        score += 8
-    elif data['rsi'] > 70:
-        score -= 15  # Aşırı alım = Satış sinyali
-    elif data['rsi'] > 60:
-        score -= 8
-    
-    # MACD Katkısı (-12 / +12)
-    if data['macd_status'] == "AL":
-        score += 12
-        if data['macd_hist'] > 0:
-            score += 3  # Histogram pozitif bonus
+def calculate_smart_score(data):
+    """
+    SNIPER STRATEJİSİ:
+    Sadece ana trend YUKARI ise ve düzeltme (pullback) gelmişse AL verir.
+    Düşüş trendinde "ucuz" diye alım yapmaz.
+    """
+    score = 0
+    reasons = []
+
+    # 1. ANA TREND FİLTRESİ
+    if data['price'] > data['ema200']:
+        score += 25
+        reasons.append("Ana Trend Boğa (+25)")
     else:
-        score -= 12
-        if data['macd_hist'] < 0:
-            score -= 3
-    
-    # Trend Katkısı (-10 / +10)
-    if data['trend_direction'] == "YUKARI":
+        score -= 25
+        reasons.append("Ana Trend Ayı (-25)")
+
+    # 2. MOMENTUM (Düzeltme Fırsatı)
+    if data['price'] > data['ema200']:
+        if data['rsi'] < 40:
+            score += 20
+            reasons.append("Trend İçi Düzeltme Fırsatı (+20)")
+        elif data['rsi'] > 70:
+            score -= 10
+            reasons.append("Aşırı Isınma (-10)")
+    else:
+        if data['rsi'] < 40:
+            score -= 10
+            reasons.append("Düşüş Trendinde Zayıflık (-10)")
+
+    # 3. AKILLI PARA ONAYI (CMF)
+    if data['cmf'] > 0.05:
+        score += 15
+        reasons.append("Para Girişi Var (+15)")
+    elif data['cmf'] < -0.05:
+        score -= 15
+        reasons.append("Para Çıkışı Var (-15)")
+
+    # 4. HACİM PATLAMASI
+    if data['volume_ratio'] > 1.5:
+        if data['change_pct'] > 0:
+            score += 10
+            reasons.append("Hacimli Yükselış (+10)")
+        else:
+            score -= 10
+            reasons.append("Hacimli Düşüş (-10)")
+
+    # 5. MACD KESİŞİMİ
+    if data['macd'] > data['macd_signal']:
         score += 10
+        reasons.append("MACD Pozitif (+10)")
     else:
         score -= 10
-    
-    # Bollinger Pozisyonu (-8 / +8)
-    if data['bb_position'] < 20:
-        score += 8  # Alt bantta = potansiyel alım
-    elif data['bb_position'] > 80:
-        score -= 8  # Üst bantta = potansiyel satış
-    
-    # Hacim Katkısı (-5 / +5)
-    if data['volume_ratio'] > 1.5 and data['obv_trend'] == "YUKARI":
-        score += 5
-    elif data['volume_ratio'] > 1.5 and data['obv_trend'] == "AŞAĞI":
-        score -= 5
-    
-    # ADX Trend Gücü (±5)
-    if data['adx'] > 25:
+        reasons.append("MACD Negatif (-10)")
+
+    # 6. BOLLINGER SIKIŞMASI
+    if data['bb_width'] < 10:
+        reasons.append("Fiyat Sıkışması (Patlama Yakın)")
         if data['trend_direction'] == "YUKARI":
             score += 5
         else:
             score -= 5
-    
-    # Sınırla
-    score = max(0, min(100, score))
-    
-    # Sinyal belirleme
-    if score >= 70:
+
+    # NORMALİZASYON (0-100)
+    final_score = 50 + score
+    final_score = max(0, min(100, final_score))
+
+    # KARAR MEKANİZMASI
+    if final_score >= 75:
         signal = "GÜÇLÜ AL"
         color = "#10b981"
-    elif score >= 55:
+    elif final_score >= 60:
         signal = "AL"
         color = "#34d399"
-    elif score <= 30:
+    elif final_score <= 25:
         signal = "GÜÇLÜ SAT"
         color = "#ef4444"
-    elif score <= 45:
+    elif final_score <= 40:
         signal = "SAT"
         color = "#f87171"
     else:
         signal = "BEKLE"
         color = "#fbbf24"
-    
-    return score, signal, color
+
+    return final_score, signal, color, reasons
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5. YAPAY ZEKA ANALİZ (FİLTRE-DOSTU KISA PROMPT)
@@ -491,7 +521,7 @@ KISA VE NET YANITLA (Maksimum 5 satır):
 3. Dikkat edilmesi gereken tek şey (1 cümle)
 """
     
-    model = genai.GenerativeModel('gemini-3-pro-preview')
+    model = genai.GenerativeModel('gemini-2.5-flash-preview')
     
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
@@ -654,11 +684,14 @@ if analyze_btn:
         data = get_advanced_data(symbol.upper().strip())
     
     if data:
-        # ═══ SİNYAL SKORU ═══
-        score, signal, signal_color = calculate_signal_score(data)
+        # ═══ SİNYAL SKORU (SNIPER ALGORİTMASI) ═══
+        score, signal, signal_color, reasons = calculate_smart_score(data)
         
         # Karar Paneli - Dopamin Odaklı
-        pulse_class = "pulse-active" if score >= 70 or score <= 30 else ""
+        pulse_class = "pulse-active" if score >= 75 or score <= 25 else ""
+        
+        # Reasons HTML
+        reasons_html = " · ".join(reasons) if reasons else ""
         
         st.markdown(f'''
         <div class="decision-panel {pulse_class}" style="--signal-color: {signal_color};">
@@ -667,6 +700,9 @@ if analyze_btn:
             <div class="signal-score">Güç: {score}/100</div>
             <div class="score-bar-container">
                 <div class="score-bar-fill" style="width: {score}%; background: {signal_color};"></div>
+            </div>
+            <div style="margin-top: 1rem; font-size: 0.7rem; color: rgba(255,255,255,0.4); letter-spacing: 0.5px;">
+                {reasons_html}
             </div>
         </div>
         ''', unsafe_allow_html=True)
@@ -720,18 +756,24 @@ if analyze_btn:
         col_left, col_right = st.columns(2)
         
         with col_left:
-            st.markdown('<div class="section-title">Momentum</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-title">Momentum & Akıllı Para</div>', unsafe_allow_html=True)
             m1, m2 = st.columns(2)
             
-            stoch_desc = "Pahalı" if data['stoch_rsi'] > 80 else "Ucuz" if data['stoch_rsi'] < 20 else "Nötr"
-            m1.metric("Stoch RSI", f"{data['stoch_rsi']:.1f}", stoch_desc)
+            # CMF (Smart Money)
+            if data['cmf'] > 0.05:
+                cmf_desc = "Para Girişi"
+            elif data['cmf'] < -0.05:
+                cmf_desc = "Para Çıkışı"
+            else:
+                cmf_desc = "Nötr"
+            m1.metric("CMF", f"{data['cmf']:.3f}", cmf_desc)
             
             bb_desc = "Üst bant" if data['bb_position'] > 80 else "Alt bant" if data['bb_position'] < 20 else "Orta"
             m2.metric("Bollinger", f"{data['bb_position']:.1f}%", bb_desc)
             
             m3, m4 = st.columns(2)
-            m3.metric("SMA 50", f"{data['sma50']:.2f} ₺", "Kısa vade")
-            m4.metric("SMA 200", f"{data['sma200']:.2f} ₺" if pd.notna(data['sma200']) else "—", "Uzun vade")
+            m3.metric("EMA 50", f"{data['ema50']:.2f} ₺", "Kısa vade")
+            m4.metric("EMA 200", f"{data['ema200']:.2f} ₺" if pd.notna(data['ema200']) else "—", "Uzun vade")
         
         with col_right:
             st.markdown('<div class="section-title">Seviyeler</div>', unsafe_allow_html=True)
