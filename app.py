@@ -473,7 +473,7 @@ KISA VE NET YANITLA (Maksimum 5 satır):
 3. Dikkat edilmesi gereken tek şey (1 cümle)
 """
     
-    model = genai.GenerativeModel('gemini-2.5-flash-preview')
+    model = genai.GenerativeModel('gemini-3-pro-preview')
     
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
