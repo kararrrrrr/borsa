@@ -975,14 +975,17 @@ if analyze_btn:
         bt_html = ""
         if backtest_results and backtest_results['total_trades'] > 0:
             wr = backtest_results['win_rate']
+            total_pnl = backtest_results['total_pnl']
+            total_trades = backtest_results['total_trades']
             wr_color = "#10b981" if wr >= 50 else "#ef4444"
+            pnl_color = "#10b981" if total_pnl > 0 else "#ef4444"
             bt_html = f'''
             <div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.06);">
                 <div style="font-size: 0.6rem; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1px; text-align: center; margin-bottom: 0.5rem;">2 Yıllık Backtest</div>
                 <div style="display: flex; justify-content: center; gap: 1.5rem;">
                     <div style="text-align: center;">
                         <div style="font-size: 0.5rem; color: rgba(255,255,255,0.3);">İşlem</div>
-                        <div style="font-size: 0.9rem; color: white;">{backtest_results["total_trades"]}</div>
+                        <div style="font-size: 0.9rem; color: white;">{total_trades}</div>
                     </div>
                     <div style="text-align: center;">
                         <div style="font-size: 0.5rem; color: rgba(255,255,255,0.3);">Kazanma</div>
@@ -990,7 +993,7 @@ if analyze_btn:
                     </div>
                     <div style="text-align: center;">
                         <div style="font-size: 0.5rem; color: rgba(255,255,255,0.3);">Toplam P/L</div>
-                        <div style="font-size: 0.9rem; color: {"#10b981" if backtest_results["total_pnl"] > 0 else "#ef4444"};">%{backtest_results["total_pnl"]:.1f}</div>
+                        <div style="font-size: 0.9rem; color: {pnl_color};">%{total_pnl:.1f}</div>
                     </div>
                 </div>
             </div>
