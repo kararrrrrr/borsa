@@ -936,7 +936,7 @@ if st.session_state.analyzed:
         data = get_advanced_data(target_symbol.upper().strip())
         weekly_data = get_weekly_trend(target_symbol.upper().strip())
         # VectorBT ile Profesyonel Backtest
-        backtest_results = run_vectorbt_backtest(target_symbol.upper().strip())
+        backtest_results = run_robust_backtest(target_symbol.upper().strip())
     
     if data:
         # ═══ SİNYAL SKORU (SNIPER ALGORİTMASI v3 - Multi-Timeframe) ═══
@@ -1114,7 +1114,7 @@ if st.session_state.analyzed:
         st.markdown('<div class="section-title">🧬 Strateji Optimizasyonu</div>', unsafe_allow_html=True)
         if st.button("En İyi Parametreleri Bul", type="secondary", use_container_width=True):
             with st.spinner("En uygun parametreler taranıyor..."):
-                best_params = optimize_strategy(target_symbol.upper().strip())
+                best_params = optimize_strategy_robust(target_symbol.upper().strip())
                 st.success("✅ Optimizasyon Tamamlandı! En yüksek getiri sağlayan ayarlar:")
                 c1, c2, c3 = st.columns(3)
                 c1.metric("RSI Periyodu", best_params.get('rsi_period', 14))
