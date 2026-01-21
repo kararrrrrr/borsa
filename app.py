@@ -250,6 +250,174 @@ else:
     st.stop()
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 2.5 HİSSE PROFİLLEME & ADAPTİF STRATEJİ SİSTEMİ
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Strateji profilleri: Her hisse tipine özel parametreler
+STRATEGY_PROFILES = {
+    "VOLATILE_TREND": {
+        "name": "Volatil Trend",
+        "entry_threshold": 65,      # Daha düşük giriş eşiği (volatil hisseler hızlı hareket eder)
+        "atr_mult": 2.0,           # Dar stop (volatilite zaten yüksek)
+        "tp_ratio": 2.5,           # Yüksek kar hedefi
+        "rsi_max": 75,             # RSI üst limiti
+        "trailing_tighten": True,  # Trend zayıflayınca stop sıkılaştır
+        "partial_exit": True,      # Kademeli kar al
+        "momentum_exit": True,     # RSI düşüşünde çık
+    },
+    "STABLE_TREND": {
+        "name": "Stabil Trend",
+        "entry_threshold": 60,      # Daha düşük eşik (yavaş hareket eder)
+        "atr_mult": 3.0,           # Geniş stop (az volatilite)
+        "tp_ratio": 2.0,           # Orta kar hedefi
+        "rsi_max": 80,             # Daha yüksek RSI toleransı
+        "trailing_tighten": False, # Stop sabit
+        "partial_exit": True,
+        "momentum_exit": False,    # RSI bazlı çıkış yok
+    },
+    "RANGE_BOUND": {
+        "name": "Yatay Seyir",
+        "entry_threshold": 70,      # Yüksek eşik (sadece güçlü sinyallerde gir)
+        "atr_mult": 1.5,           # Çok dar stop
+        "tp_ratio": 1.5,           # Düşük kar hedefi (range içinde)
+        "rsi_max": 60,             # RSI 60'ın üzerinde girme
+        "rsi_entry_min": 35,       # RSI 35'in altında gir (oversold)
+        "trailing_tighten": True,
+        "partial_exit": False,     # Tamamını bir seferde sat
+        "momentum_exit": True,     # RSI 60'ta çık
+    },
+    "BREAKOUT_PRONE": {
+        "name": "Kırılım Adayı",
+        "entry_threshold": 75,      # En yüksek eşik (BB sıkışması bekle)
+        "atr_mult": 2.5,           # Orta stop
+        "tp_ratio": 3.0,           # Yüksek kar hedefi (breakout'lar büyük hareket eder)
+        "rsi_max": 70,
+        "bb_squeeze_required": True,  # BB sıkışması zorunlu
+        "trailing_tighten": False,
+        "partial_exit": True,
+        "momentum_exit": False,
+    },
+    "DEFAULT": {
+        "name": "Varsayılan",
+        "entry_threshold": 70,
+        "atr_mult": 2.5,
+        "tp_ratio": 2.0,
+        "rsi_max": 75,
+        "trailing_tighten": False,
+        "partial_exit": True,
+        "momentum_exit": False,
+    }
+}
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def analyze_stock_profile(symbol):
+    """
+    Hisse profilini analiz eder ve en uygun strateji tipini döndürür.
+    
+    Analiz kriterleri:
+    - Volatilite: ATR / Fiyat oranı
+    - Trend Sürekliliği: Fiyatın EMA50 üzerinde kalma oranı
+    - ADX Ortalaması: Trend gücü ortalaması
+    - BB Width Ortalaması: Sıkışma potansiyeli
+    """
+    try:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="1y")
+        
+        if df.empty or len(df) < 100:
+            return "DEFAULT", STRATEGY_PROFILES["DEFAULT"]
+        
+        closes = df['Close']
+        highs = df['High']
+        lows = df['Low']
+        
+        # ATR hesapla
+        high_low = highs - lows
+        high_close = np.abs(highs - closes.shift())
+        low_close = np.abs(lows - closes.shift())
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        atr = tr.rolling(window=14).mean()
+        
+        # EMA50
+        ema50 = closes.ewm(span=50, adjust=False).mean()
+        
+        # ADX
+        plus_dm = highs.diff()
+        minus_dm = lows.diff()
+        plus_dm[plus_dm < 0] = 0
+        minus_dm[minus_dm > 0] = 0
+        tr14 = tr.rolling(window=14).sum()
+        plus_di = 100 * (plus_dm.rolling(window=14).sum() / tr14)
+        minus_di = 100 * (np.abs(minus_dm).rolling(window=14).sum() / tr14)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = dx.rolling(window=14).mean()
+        
+        # Bollinger Band Width
+        bb_mid = closes.rolling(window=20).mean()
+        bb_std = closes.rolling(window=20).std()
+        bb_width = (bb_std * 4) / bb_mid * 100  # % genişlik
+        
+        # Metrikleri hesapla (son 60 gün)
+        recent = df.tail(60)
+        recent_closes = recent['Close']
+        recent_ema50 = ema50.tail(60)
+        recent_atr = atr.tail(60)
+        recent_adx = adx.tail(60)
+        recent_bb_width = bb_width.tail(60)
+        
+        # 1. Volatilite Skoru (ATR/Fiyat %)
+        volatility = (recent_atr.mean() / recent_closes.mean()) * 100
+        
+        # 2. Trend Sürekliliği (Fiyat EMA50 üzerinde kalma %)
+        above_ema = (recent_closes > recent_ema50).sum() / len(recent_closes) * 100
+        
+        # 3. ADX Ortalaması
+        avg_adx = recent_adx.mean()
+        
+        # 4. BB Width Ortalaması (sıkışma potansiyeli)
+        avg_bb_width = recent_bb_width.mean()
+        
+        # Profil belirleme mantığı
+        profile_type = "DEFAULT"
+        
+        # Volatil Trend: Yüksek volatilite + Güçlü trend
+        if volatility > 3.0 and avg_adx > 25 and above_ema > 60:
+            profile_type = "VOLATILE_TREND"
+        
+        # Stabil Trend: Düşük volatilite + Güçlü trend
+        elif volatility < 2.5 and avg_adx > 20 and above_ema > 70:
+            profile_type = "STABLE_TREND"
+        
+        # Range Bound: Düşük ADX + Orta trend sürekliliği
+        elif avg_adx < 20 and 30 < above_ema < 70:
+            profile_type = "RANGE_BOUND"
+        
+        # Breakout Prone: Düşük BB width (sıkışma) + Düşük ADX
+        elif avg_bb_width < 8 and avg_adx < 25:
+            profile_type = "BREAKOUT_PRONE"
+        
+        # Yüksek trendli ama orta volatilite
+        elif above_ema > 65 and avg_adx > 22:
+            profile_type = "STABLE_TREND"
+        
+        # Yüksek volatilite
+        elif volatility > 3.5:
+            profile_type = "VOLATILE_TREND"
+        
+        profile = STRATEGY_PROFILES[profile_type].copy()
+        profile['metrics'] = {
+            'volatility': round(volatility, 2),
+            'trend_continuity': round(above_ema, 1),
+            'avg_adx': round(avg_adx, 1),
+            'avg_bb_width': round(avg_bb_width, 1)
+        }
+        
+        return profile_type, profile
+        
+    except Exception as e:
+        return "DEFAULT", STRATEGY_PROFILES["DEFAULT"]
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 3. GELİŞMİŞ TEKNİK ANALİZ MOTORU
 # ═══════════════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=120)
@@ -524,13 +692,26 @@ def get_weekly_trend(symbol):
 # 3.6 PROFESYONEL BACKTEST & OPTİMİZASYON (Robust Sharpe & Drawdown)
 # ═══════════════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=600)
-def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
+def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0, profile=None):
     """
-    MATRIX BACKTEST MOTORU (Düzeltilmiş Versiyon - Unified Score)
-    - Canlı analizdeki 'calculate_decision_score' ile AYNI giriş mantığını kullanır.
-    - Tüm indikatörleri hesaplar ve simülasyonu çalıştırır.
+    ADAPTİF BACKTEST MOTORU v2.0
+    - Hisse profiline göre dinamik parametreler
+    - Momentum bazlı çıkış (RSI düşüşü)
+    - ADX zayıflamasında stop sıkılaştırma
+    - Kademeli kar alma
     """
     try:
+        # Profil yoksa varsayılanı kullan
+        if profile is None:
+            profile = STRATEGY_PROFILES["DEFAULT"]
+        
+        # Profil parametreleri (override yoksa)
+        entry_threshold = profile.get('entry_threshold', 70)
+        use_momentum_exit = profile.get('momentum_exit', False)
+        use_trailing_tighten = profile.get('trailing_tighten', False)
+        use_partial_exit = profile.get('partial_exit', True)
+        rsi_max = profile.get('rsi_max', 75)
+        
         # 1. Veri Hazırlığı
         ticker = yf.Ticker(symbol)
         df = ticker.history(period="2y")
@@ -545,10 +726,10 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
         # EMA & Trend
         df['EMA200'] = closes.ewm(span=200, adjust=False).mean()
         df['EMA50'] = closes.ewm(span=50, adjust=False).mean()
-        df['SMA50'] = closes.rolling(window=50).mean() # YENİ
+        df['SMA50'] = closes.rolling(window=50).mean()
         
         # Değişim
-        df['Change_Pct'] = closes.pct_change() * 100 # YENİ
+        df['Change_Pct'] = closes.pct_change() * 100
 
         # RSI
         delta = closes.diff()
@@ -564,33 +745,30 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         df['ATR'] = tr.rolling(window=14).mean()
 
-        # Bollinger Bands (YENİ)
+        # Bollinger Bands
         bb_mid = closes.rolling(window=20).mean()
         bb_std = closes.rolling(window=20).std()
         df['BB_Upper'] = bb_mid + (bb_std * 2)
         df['BB_Lower'] = bb_mid - (bb_std * 2)
         df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / bb_mid * 100
 
-        # Volume Ratio (YENİ)
+        # Volume Ratio
         vol_sma20 = volumes.rolling(window=20).mean()
         df['Volume_Ratio'] = volumes / vol_sma20
 
-        # CMF (YENİ)
+        # CMF
         mfv = ((closes - lows) - (highs - closes)) / (highs - lows)
         mfv = mfv.fillna(0)
         volume_mfv = mfv * volumes
         df['CMF'] = volume_mfv.rolling(20).sum() / volumes.rolling(20).sum()
 
         # ICHIMOKU
-        # Conversion Line (Tenkan)
         nine_period_high = highs.rolling(window=9).max()
         nine_period_low = lows.rolling(window=9).min()
         df['Tenkan'] = (nine_period_high + nine_period_low) / 2
-        # Base Line (Kijun)
         period26_high = highs.rolling(window=26).max()
         period26_low = lows.rolling(window=26).min()
         df['Kijun'] = (period26_high + period26_low) / 2
-        # Span A & B (Geleceğe Shift edilmiş)
         df['SpanA'] = ((df['Tenkan'] + df['Kijun']) / 2).shift(26)
         period52_high = highs.rolling(window=52).max()
         period52_low = lows.rolling(window=52).min()
@@ -607,6 +785,12 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
         dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
         df['ADX'] = dx.rolling(window=14).mean()
 
+        # MACD (momentum çıkışı için)
+        ema12 = closes.ewm(span=12, adjust=False).mean()
+        ema26 = closes.ewm(span=26, adjust=False).mean()
+        df['MACD'] = ema12 - ema26
+        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+
         df = df.dropna()
         
         # 2. Simülasyon Değişkenleri
@@ -621,7 +805,6 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
         
         # İşlem geçmişi (Grafik için)
         trades = []
-        current_entry_date = None
         
         # Hız için numpy dizileri
         v_opens = df['Open'].values
@@ -644,36 +827,81 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
         v_bb_width = df['BB_Width'].values
         v_vol_ratio = df['Volume_Ratio'].values
         v_change = df['Change_Pct'].values
-
+        v_macd = df['MACD'].values
+        v_macd_signal = df['MACD_Signal'].values
         
         # Stop Takibi ve Kar Al
         trailing_stop_price = 0
         take_profit_price = 0
         entry_price = 0
-        partial_exit_done = False  # Kademeli kâr alma için
-        original_position = 0  # İlk pozisyon büyüklüğü
+        partial_exit_done = False
+        original_position = 0
+        last_trade_bar = -999
+        entry_rsi = 0  # Girişteki RSI'ı takip et
+        prev_adx = 0   # ADX düşüşünü takip et
+        adx_decline_count = 0  # Üst üste kaç gün ADX düştü
         
         for i in range(len(df) - 1):
             current_close = v_closes[i]
+            current_rsi = v_rsi[i]
+            current_adx = v_adx[i]
+            current_macd = v_macd[i]
+            current_macd_signal = v_macd_signal[i]
             
             # ─── ÇIKIŞ MANTIĞI ───
             if in_position:
-                # 0. BREAKEVEN MEKANİZMASI (1 ATR kârda maliyet fiyatına çek)
-                if current_close >= entry_price + (1.0 * v_atr[i]):
-                    trailing_stop_price = max(trailing_stop_price, entry_price)  # Cost stop
+                # ADX Düşüş Takibi
+                if current_adx < prev_adx:
+                    adx_decline_count += 1
+                else:
+                    adx_decline_count = 0
+                prev_adx = current_adx
                 
-                # 1. KADEMELİ KAR AL (İlk hedefte %50 pozisyon kapat)
-                if tp_ratio > 0 and not partial_exit_done and v_highs[i] >= take_profit_price:
-                    exit_price = take_profit_price
-                    partial_size = position * 0.5  # %50'sini sat
-                    cash += partial_size * exit_price * (1 - commission)
-                    position = position - partial_size  # Kalan %50
-                    partial_exit_done = True
-                    # Breakeven'a çek (kalan pozisyon için)
+                # ═══ YENİ: MOMENTUM ÇIKIŞI (RSI Düşüşü) ═══
+                if use_momentum_exit and entry_rsi > 0:
+                    # RSI 70'ten 50'nin altına düşerse → Pozisyonun %50'sini kapat
+                    if entry_rsi > 60 and current_rsi < 50 and not partial_exit_done:
+                        exit_price = current_close
+                        partial_size = position * 0.5
+                        cash += partial_size * exit_price * (1 - commission)
+                        position = position - partial_size
+                        partial_exit_done = True
+                        trailing_stop_price = max(trailing_stop_price, entry_price)
+                        trades.append({
+                            'type': 'partial_exit',
+                            'date': df.index[i],
+                            'price': exit_price,
+                            'profit': True,
+                            'reason': 'Momentum Exit'
+                        })
+                        continue
+                
+                # ═══ YENİ: ADX ZAYIFLAMASI STOP SIKILAŞTIRMA ═══
+                if use_trailing_tighten and adx_decline_count >= 3:
+                    # ADX 3 gün üst üste düşerse stop'u sıkılaştır
+                    tighter_stop = current_close - (atr_mult * 0.5 * v_atr[i])
+                    if tighter_stop > trailing_stop_price:
+                        trailing_stop_price = tighter_stop
+                
+                # ═══ YENİ: MACD ÇAPRAZI ═══
+                # MACD sinyal altına geçerse → Stop'u maliyete çek
+                if current_macd < current_macd_signal and trailing_stop_price < entry_price:
+                    if current_close > entry_price:  # Sadece kârdayken
+                        trailing_stop_price = entry_price
+                
+                # 0. BREAKEVEN MEKANİZMASI (1.5 ATR kârda maliyet fiyatına çek)
+                if current_close >= entry_price + (1.5 * v_atr[i]):
                     trailing_stop_price = max(trailing_stop_price, entry_price)
-                    # İkinci hedef belirle (2x TP)
+                
+                # 1. KADEMELİ KAR AL (İlk hedefte pozisyon kapat)
+                if use_partial_exit and tp_ratio > 0 and not partial_exit_done and v_highs[i] >= take_profit_price:
+                    exit_price = take_profit_price
+                    partial_size = position * 0.4  # %40'ını sat
+                    cash += partial_size * exit_price * (1 - commission)
+                    position = position - partial_size
+                    partial_exit_done = True
+                    trailing_stop_price = max(trailing_stop_price, entry_price)
                     take_profit_price = entry_price + (atr_mult * v_atr[i] * tp_ratio * 2)
-                    # Kayıt (kısmi çıkış)
                     trades.append({
                         'type': 'partial_exit',
                         'date': df.index[i],
@@ -682,7 +910,7 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
                     })
                     continue
                 
-                # 2. TAM KAR AL (İkinci hedef - kalan pozisyon)
+                # 2. TAM KAR AL (İkinci hedef)
                 if tp_ratio > 0 and partial_exit_done and v_highs[i] >= take_profit_price:
                     exit_price = take_profit_price
                     cash += position * exit_price * (1 - commission)
@@ -705,7 +933,7 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
                     
                     cash += position * exit_price * (1 - commission)
                     is_profit = exit_price > entry_price
-                    if is_profit or partial_exit_done: wins += 1  # Kısmi kar alındıysa kazanç say
+                    if is_profit or partial_exit_done: wins += 1
                     trades.append({
                         'type': 'exit',
                         'date': df.index[i],
@@ -722,8 +950,8 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
                 if new_stop > trailing_stop_price:
                     trailing_stop_price = new_stop
 
-                # 5. Acil Çıkış (Trend Çöküşü - %5 eşik)
-                if current_close < v_ema200[i] * 0.95:  # %3 -> %5'e gevşetildi
+                # 5. Acil Çıkış (Trend Çöküşü)
+                if current_close < v_ema200[i] * 0.95:
                     exit_price = current_close
                     cash += position * exit_price * (1 - commission)
                     is_profit = exit_price > entry_price
@@ -739,9 +967,13 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
                     partial_exit_done = False
                     continue
 
-            # ─── GİRİŞ MANTIĞI (Unified Score) ───
+            # ─── GİRİŞ MANTIĞI (Profil Bazlı) ───
             if not in_position:
-                # Veri sözlüğünü hazırla (Scalar değerler)
+                # RSI üst limit kontrolü (profil bazlı)
+                if current_rsi > rsi_max:
+                    continue
+                
+                # Veri sözlüğünü hazırla
                 row_data = {
                     'price': current_close,
                     'ema50': v_ema50[i],
@@ -763,18 +995,24 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
                 # Ortak skorlama fonksiyonunu çağır
                 score, _ = calculate_decision_score(row_data, weekly_data=None)
                 
-                # ALIM EŞİĞİ
-                if score >= 60:
+                # CONTRARIAN GİRİŞ: Düşük skor = Oversold fırsat = AL
+                # Ters eşik hesapla (70 -> 30, 65 -> 35, 60 -> 40)
+                inverted_threshold = 100 - entry_threshold
+                if score <= inverted_threshold and (i - last_trade_bar) >= 5:
                     entry_price = v_opens[i+1]
                     current_entry_date = df.index[i+1]
                     size = cash / entry_price
                     cost = size * entry_price * (1 + commission)
                     cash -= cost
                     position = size
-                    original_position = size  # Orijinal pozisyon kaydet
+                    original_position = size
                     in_position = True
                     trades_count += 1
-                    partial_exit_done = False  # Reset
+                    partial_exit_done = False
+                    last_trade_bar = i
+                    entry_rsi = current_rsi  # Giriş RSI'ını kaydet
+                    adx_decline_count = 0
+                    prev_adx = current_adx
                     trades.append({
                         'type': 'entry',
                         'date': current_entry_date,
@@ -786,7 +1024,7 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
                     trailing_stop_price = entry_price - risk
                     
                     if tp_ratio > 0:
-                        take_profit_price = entry_price + (risk * tp_ratio)  # İlk hedef
+                        take_profit_price = entry_price + (risk * tp_ratio)
                     else:
                         take_profit_price = 999999
                 
@@ -806,46 +1044,77 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
 
 def optimize_strategy_robust(symbol):
     """
-    Basit Grid Search ile en iyi parametreleri bulur.
-    Denenenler: ATR Çarpanı (Stop), RSI Periyodu
+    Profil Bazlı Optimizasyon:
+    1. Hisse profilini analiz eder
+    2. Profil parametrelerini kullanarak backtest yapar
+    3. Grid search ile ince ayar yapar
     """
     try:
-        # Taranacak parametre aralıkları
-        param_grid = {
-            'atr_multiplier': [2.0, 2.5, 3.0, 3.5], # Stop mesafesi seçenekleri
-            'rsi_period': [14],                     # RSI periyodu (Genelde 14 iyidir, sabit kalabilir)
-            'take_profit_ratio': [1.5, 2.0, 3.0]    # Risk/Ödül oranı
-        }
+        # 1. Hisse profilini analiz et
+        profile_type, profile = analyze_stock_profile(symbol)
+        
+        # Profil bazlı başlangıç parametreleri
+        base_atr = profile.get('atr_mult', 2.5)
+        base_tp = profile.get('tp_ratio', 2.0)
+        
+        # 2. Profil parametreleriyle backtest
+        profile_result = run_robust_backtest(symbol, atr_mult=base_atr, tp_ratio=base_tp, profile=profile)
         
         best_score = -9999
         best_params = {
-            'atr_multiplier': 3.0, 
+            'atr_multiplier': base_atr, 
             'rsi_period': 14,
-            'take_profit_ratio': 2.0
+            'take_profit_ratio': base_tp,
+            'profile_type': profile_type,
+            'profile': profile
         }
-
-        # Kombinasyonları dene
-        for atr_mult in param_grid['atr_multiplier']:
-            for tp_ratio in param_grid['take_profit_ratio']:
-                # Mevcut backtest fonksiyonunu parametreli çağıracak şekilde güncellemeliyiz
-                # (Aşağıda run_robust_backtest'i de güncelleyeceğiz)
-                result = run_robust_backtest(symbol, atr_mult=atr_mult, tp_ratio=tp_ratio)
+        
+        if profile_result and 'total_pnl' in profile_result:
+            # Win rate ağırlıklı skor (PnL + WinRate bonus)
+            best_score = profile_result['total_pnl'] + (profile_result['win_rate'] * 0.3)
+            if profile_result['total_trades'] < 3:
+                best_score -= 20  # Az işlem cezası
+        
+        # 3. Grid search ile ince ayar (profil etrafında)
+        atr_range = [base_atr - 0.5, base_atr, base_atr + 0.5]
+        tp_range = [base_tp - 0.5, base_tp, base_tp + 0.5]
+        
+        for atr_mult in atr_range:
+            if atr_mult < 1.0:  # Minimum 1.0 ATR
+                continue
+            for tp_ratio in tp_range:
+                if tp_ratio < 1.0:  # Minimum 1.0 TP
+                    continue
+                    
+                result = run_robust_backtest(symbol, atr_mult=atr_mult, tp_ratio=tp_ratio, profile=profile)
                 
                 if result and 'total_pnl' in result:
-                    # Başarı kriteri: Hem PNL yüksek olsun hem de en az 5 işlem yapmış olsun
-                    if result['total_trades'] > 5:
-                        score = result['total_pnl']
-                        if score > best_score:
-                            best_score = score
-                            best_params = {
-                                'atr_multiplier': atr_mult,
-                                'rsi_period': 14,
-                                'take_profit_ratio': tp_ratio
-                            }
+                    # Skor: PnL + Win Rate bonus
+                    score = result['total_pnl'] + (result['win_rate'] * 0.3)
+                    
+                    # Az işlem cezası (gevşetildi)
+                    if result['total_trades'] < 3:
+                        score -= 20
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_params = {
+                            'atr_multiplier': atr_mult,
+                            'rsi_period': 14,
+                            'take_profit_ratio': tp_ratio,
+                            'profile_type': profile_type,
+                            'profile': profile
+                        }
                             
         return best_params
     except Exception as e:
-        return {'atr_multiplier': 3.0, 'rsi_period': 14, 'take_profit_ratio': 2.0}
+        return {
+            'atr_multiplier': 2.5, 
+            'rsi_period': 14, 
+            'take_profit_ratio': 2.0,
+            'profile_type': 'DEFAULT',
+            'profile': STRATEGY_PROFILES['DEFAULT']
+        }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. SİNYAL SKOR HESAPLAMA
@@ -900,6 +1169,10 @@ def calculate_decision_score(data, weekly_data=None):
     if ema50 > 0:
         dist_to_ema50 = ((price - ema50) / ema50) * 100
     
+    # ─── HARD BLOCK: DÜŞÜŞ TRENDİ (Fiyat EMA200 Altında) ───
+    if ema200 > 0 and price < ema200:
+        return 0, ["Fiyat EMA200 Altında (Blok)"]
+    
     # 1. TIER: TREND ANALİZİ (Ichimoku & EMA)
     trend_score = 0
     
@@ -933,18 +1206,45 @@ def calculate_decision_score(data, weekly_data=None):
     elif weekly_data: # Veri var ama Boğa değilse
         trend_score -= 10
 
-    # AŞIRI UZAMA CEZASI (Extension Penalty - Sıkılaştırıldı)
-    if dist_to_ema50 > 8:  # %15 -> %8'e sıkıştırıldı
-        trend_score -= 25  # Daha yüksek ceza
-        reasons.append("EMA50'den Aşırı Uzak (Riskli)")
-    elif dist_to_ema50 > 5:
-        trend_score -= 10
-        reasons.append("EMA50'den Uzaklaşıyor")
+    # AŞIRI UZAMA CEZASI (Haftalık Trende Bağlı - Uzun Vadeli Trend Koruma)
+    # Haftalık trend BOĞA ise toleransı artır (güçlü trendleri kaçırma!)
+    is_weekly_bullish = weekly_data and weekly_data.get('ema_cross') == "BOĞA"
+    
+    if is_weekly_bullish:
+        # Haftalık trend güçlü → Cezayı hafiflet
+        if dist_to_ema50 > 12:  # %12 tolerans (normalde %8)
+            trend_score -= 15  # Düşük ceza
+            reasons.append("EMA50'den Uzak (Haftalık Trend Güçlü)")
+        elif dist_to_ema50 > 8:
+            trend_score -= 5
+    else:
+        # Haftalık trend zayıf → Normal ceza
+        if dist_to_ema50 > 8:
+            trend_score -= 25
+            reasons.append("EMA50'den Aşırı Uzak (Riskli)")
+        elif dist_to_ema50 > 5:
+            trend_score -= 10
+            reasons.append("EMA50'den Uzaklaşıyor")
 
     # 2. TIER: MOMENTUM
     mom_score = 0
     
-    # RSI & Bulut İlişkisi
+    # ─── ADX FİLTRESİ (Trend Gücü Zorunlu) ───
+    if adx < 20:
+        mom_score -= 30
+        reasons.append("Trend Zayıf (ADX < 20)")
+    elif adx >= 25:
+        mom_score += 10
+        reasons.append("Güçlü Trend (ADX > 25)")
+    
+    # ─── MOMENTUM TEYİDİ (Son 3 günlük değişim) ───
+    recent_change = get_val('change_pct', 0)
+    if recent_change < -2:
+        mom_score -= 20
+        reasons.append("Negatif Momentum")
+    elif recent_change > 2:
+        mom_score += 10
+        reasons.append("Pozitif Momentum")
     if rsi > 50 and is_above_cloud:
         mom_score += 5
     elif rsi < 50 and is_below_cloud:
@@ -1015,6 +1315,10 @@ def calculate_decision_score(data, weekly_data=None):
     if weekly_data and weekly_data.get('ema_cross') == "AYI":
         normalized_score = min(normalized_score, 55)  # Haftalık ayı ise asla AL verme
         reasons.append("Haftalık Trend AYI (Blok)")
+    
+    # ─── ADX FİNAL BLOCK ───
+    if adx < 20:
+        normalized_score = min(normalized_score, 55)  # Trend yoksa asla AL verme
         
     return int(normalized_score), reasons
 
@@ -1025,14 +1329,16 @@ def calculate_smart_score(data, weekly_data=None, atr_mult=None, tp_ratio=None):
     """
     score, reasons = calculate_decision_score(data, weekly_data)
     
-    # Renk ve Etiket
-    if score >= 80:
+    # Renk ve Etiket (CONTRARIAN - TERSİNE ÇEVRİLMİŞ)
+    # Düşük skor = Oversold fırsat = AL
+    # Yüksek skor = Overbought tehlike = SAT
+    if score <= 20:
         signal, color = "GÜÇLÜ AL", "#10b981"
-    elif score >= 60:
-        signal, color = "AL", "#34d399"
-    elif score <= 20:
-        signal, color = "GÜÇLÜ SAT", "#ef4444"
     elif score <= 40:
+        signal, color = "AL", "#34d399"
+    elif score >= 80:
+        signal, color = "GÜÇLÜ SAT", "#ef4444"
+    elif score >= 60:
         signal, color = "SAT", "#f87171"
     else:
         signal, color = "BEKLE", "#fbbf24"
@@ -1432,7 +1738,8 @@ with tab_analiz:
             backtest_results = run_robust_backtest(
                 target_symbol.upper().strip(), 
                 atr_mult=best_params['atr_multiplier'],
-                tp_ratio=best_params['take_profit_ratio']
+                tp_ratio=best_params['take_profit_ratio'],
+                profile=best_params.get('profile')
             )
         
         if data:
@@ -1457,6 +1764,10 @@ with tab_analiz:
             tp1 = risk_levels['take_profit_1']
             tp2 = risk_levels['take_profit_2']
             
+            # Profil bilgisi
+            profile_type = best_params.get('profile_type', 'DEFAULT')
+            profile_name = best_params.get('profile', {}).get('name', 'Varsayılan')
+            
             # Backtest bilgisi
             bt_html = ""
             if backtest_results and backtest_results.get('total_trades', 0) > 0:
@@ -1465,10 +1776,25 @@ with tab_analiz:
                 total_trades = backtest_results['total_trades']
                 wr_color = "#10b981" if wr >= 50 else "#ef4444"
                 pnl_color = "#10b981" if total_pnl > 0 else "#ef4444"
+                
+                # Profil rengi
+                profile_colors = {
+                    "VOLATILE_TREND": "#f59e0b",
+                    "STABLE_TREND": "#10b981",
+                    "RANGE_BOUND": "#3b82f6",
+                    "BREAKOUT_PRONE": "#8b5cf6",
+                    "DEFAULT": "#6b7280"
+                }
+                profile_color = profile_colors.get(profile_type, "#6b7280")
+                
                 bt_html = f'''
 <div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.06);">
 <div style="font-size: 0.6rem; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1px; text-align: center; margin-bottom: 0.5rem;">2 Yıllık Backtest</div>
 <div style="display: flex; justify-content: center; gap: 1.5rem;">
+<div style="text-align: center;">
+<div style="font-size: 0.5rem; color: rgba(255,255,255,0.3);">Strateji</div>
+<div style="font-size: 0.75rem; color: {profile_color}; font-weight: 600;">{profile_name}</div>
+</div>
 <div style="text-align: center;">
 <div style="font-size: 0.5rem; color: rgba(255,255,255,0.3);">İşlem</div>
 <div style="font-size: 0.9rem; color: white;">{total_trades}</div>
