@@ -652,6 +652,7 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
         entry_price = 0
         partial_exit_done = False  # Kademeli kâr alma için
         original_position = 0  # İlk pozisyon büyüklüğü
+        last_trade_bar = -999  # Cooldown için son işlem barı
         
         for i in range(len(df) - 1):
             current_close = v_closes[i]
@@ -763,8 +764,8 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
                 # Ortak skorlama fonksiyonunu çağır
                 score, _ = calculate_decision_score(row_data, weekly_data=None)
                 
-                # ALIM EŞİĞİ
-                if score >= 60:
+                # ALIM EŞİĞİ (70'e yükseltildi) + COOLDOWN (5 gün)
+                if score >= 70 and (i - last_trade_bar) >= 5:
                     entry_price = v_opens[i+1]
                     current_entry_date = df.index[i+1]
                     size = cash / entry_price
@@ -775,6 +776,7 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
                     in_position = True
                     trades_count += 1
                     partial_exit_done = False  # Reset
+                    last_trade_bar = i  # Cooldown için kaydet
                     trades.append({
                         'type': 'entry',
                         'date': current_entry_date,
@@ -900,6 +902,10 @@ def calculate_decision_score(data, weekly_data=None):
     if ema50 > 0:
         dist_to_ema50 = ((price - ema50) / ema50) * 100
     
+    # ─── HARD BLOCK: DÜŞÜŞ TRENDİ (Fiyat EMA200 Altında) ───
+    if ema200 > 0 and price < ema200:
+        return 0, ["Fiyat EMA200 Altında (Blok)"]
+    
     # 1. TIER: TREND ANALİZİ (Ichimoku & EMA)
     trend_score = 0
     
@@ -944,7 +950,22 @@ def calculate_decision_score(data, weekly_data=None):
     # 2. TIER: MOMENTUM
     mom_score = 0
     
-    # RSI & Bulut İlişkisi
+    # ─── ADX FİLTRESİ (Trend Gücü Zorunlu) ───
+    if adx < 20:
+        mom_score -= 30
+        reasons.append("Trend Zayıf (ADX < 20)")
+    elif adx >= 25:
+        mom_score += 10
+        reasons.append("Güçlü Trend (ADX > 25)")
+    
+    # ─── MOMENTUM TEYİDİ (Son 3 günlük değişim) ───
+    recent_change = get_val('change_pct', 0)
+    if recent_change < -2:
+        mom_score -= 20
+        reasons.append("Negatif Momentum")
+    elif recent_change > 2:
+        mom_score += 10
+        reasons.append("Pozitif Momentum")
     if rsi > 50 and is_above_cloud:
         mom_score += 5
     elif rsi < 50 and is_below_cloud:
@@ -1015,6 +1036,10 @@ def calculate_decision_score(data, weekly_data=None):
     if weekly_data and weekly_data.get('ema_cross') == "AYI":
         normalized_score = min(normalized_score, 55)  # Haftalık ayı ise asla AL verme
         reasons.append("Haftalık Trend AYI (Blok)")
+    
+    # ─── ADX FİNAL BLOCK ───
+    if adx < 20:
+        normalized_score = min(normalized_score, 55)  # Trend yoksa asla AL verme
         
     return int(normalized_score), reasons
 
