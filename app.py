@@ -524,11 +524,9 @@ def get_weekly_trend(symbol):
 # 3.6 PROFESYONEL BACKTEST & OPTİMİZASYON (Robust Sharpe & Drawdown)
 # ═══════════════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=600)
-def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
+def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0, rsi_limit=75):
     """
-    MATRIX BACKTEST MOTORU (Düzeltilmiş Versiyon - Unified Score)
-    - Canlı analizdeki 'calculate_decision_score' ile AYNI giriş mantığını kullanır.
-    - Tüm indikatörleri hesaplar ve simülasyonu çalıştırır.
+    rsi_limit parametresi eklendi.
     """
     try:
         # 1. Veri Hazırlığı
@@ -761,7 +759,7 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
                 }
                 
                 # Ortak skorlama fonksiyonunu çağır
-                score, _ = calculate_decision_score(row_data, weekly_data=None)
+                score, _ = calculate_decision_score(row_data, weekly_data=None, rsi_limit=rsi_limit)
                 
                 # ALIM EŞİĞİ
                 if score >= 60:
@@ -806,77 +804,71 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
 
 def optimize_strategy_robust(symbol):
     """
-    Basit Grid Search ile en iyi parametreleri bulur.
-    Denenenler: ATR Çarpanı (Stop), RSI Periyodu
+    Gelişmiş Grid Search:
+    Hem Çıkış (ATR Stop) hem de Giriş (RSI Limiti) ayarlarını optimize eder.
     """
     try:
-        # Taranacak parametre aralıkları
+        # Taranacak parametreler
+        # rsi_limit: 75 (Güvenli) vs 85 (Ralli/Agresif)
         param_grid = {
-            'atr_multiplier': [2.0, 2.5, 3.0, 3.5], # Stop mesafesi seçenekleri
-            'rsi_period': [14],                     # RSI periyodu (Genelde 14 iyidir, sabit kalabilir)
-            'take_profit_ratio': [1.5, 2.0, 3.0]    # Risk/Ödül oranı
+            'atr_multiplier': [2.0, 3.0], 
+            'take_profit_ratio': [2.0, 3.0],
+            'rsi_limit': [75, 85]  # Agresif mod eklendi
         }
         
         best_score = -9999
+        # Varsayılan (Güvenli) ayarlar
         best_params = {
-            'atr_multiplier': 3.0, 
-            'rsi_period': 14,
-            'take_profit_ratio': 2.0
+            'atr_multiplier': 2.5, 
+            'take_profit_ratio': 2.0,
+            'rsi_limit': 75
         }
 
-        # Kombinasyonları dene
+        # Tüm kombinasyonları dene
         for atr_mult in param_grid['atr_multiplier']:
             for tp_ratio in param_grid['take_profit_ratio']:
-                # Mevcut backtest fonksiyonunu parametreli çağıracak şekilde güncellemeliyiz
-                # (Aşağıda run_robust_backtest'i de güncelleyeceğiz)
-                result = run_robust_backtest(symbol, atr_mult=atr_mult, tp_ratio=tp_ratio)
-                
-                if result and 'total_pnl' in result:
-                    # Başarı kriteri: Hem PNL yüksek olsun hem de en az 5 işlem yapmış olsun
-                    if result['total_trades'] > 5:
-                        score = result['total_pnl']
-                        if score > best_score:
-                            best_score = score
-                            best_params = {
-                                'atr_multiplier': atr_mult,
-                                'rsi_period': 14,
-                                'take_profit_ratio': tp_ratio
-                            }
+                for rsi_lim in param_grid['rsi_limit']:
+                    
+                    result = run_robust_backtest(
+                        symbol, 
+                        atr_mult=atr_mult, 
+                        tp_ratio=tp_ratio,
+                        rsi_limit=rsi_lim
+                    )
+                    
+                    if result and 'total_pnl' in result:
+                        # PNL yüksekse ve en az 3 işlem yapmışsa seç
+                        if result['total_trades'] >= 3:
+                            score = result['total_pnl']
+                            if score > best_score:
+                                best_score = score
+                                best_params = {
+                                    'atr_multiplier': atr_mult,
+                                    'take_profit_ratio': tp_ratio,
+                                    'rsi_limit': rsi_lim
+                                }
                             
         return best_params
     except Exception as e:
-        return {'atr_multiplier': 3.0, 'rsi_period': 14, 'take_profit_ratio': 2.0}
+        return {'atr_multiplier': 2.5, 'take_profit_ratio': 2.0, 'rsi_limit': 75}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. SİNYAL SKOR HESAPLAMA
 # ═══════════════════════════════════════════════════════════════════════════════
-def calculate_decision_score(data, weekly_data=None):
+def calculate_decision_score(data, weekly_data=None, rsi_limit=75):
     """
-    MERKEZİ SKORLAMA MOTORU
-    Hem Backtest hem de Canlı Analiz için ortak mantık kullanılır.
-    
-    Beklenen 'data' sözlüğü anahtarları:
-    - price, ema50, ema200, sma50
-    - rsi, adx, cmf, volume_ratio
-    - bb_upper, bb_lower, bb_width
-    - span_a, span_b
-    - divergence (opsiyonel, varsayılan 'YOK')
-    - change_pct (opsiyonel, varsayılan 0)
-    
-    Beklenen 'weekly_data' (opsiyonel):
-    - ema_cross ("BOĞA" veya "AYI")
+    rsi_limit: 75 (Muhafazakar) veya 85 (Agresif/Ralli Modu)
     """
     base_score = 50
     score = 0
     reasons = []
     
-    # KATSAYILAR (SİNYAL KALİTESİ İÇİN DENGELENDİ)
-    W_TREND = 1.0     # Trend tek başına yeterli değil (Eski: 2.0)
-    W_MOMENTUM = 2.0  # Aşırı alım/satım daha önemli (Eski: 1.5)
-    W_VOLUME = 1.5    # Hacim teyidi şart (Eski: 1.2)
-    W_PATTERN = 1.5   # Formasyon (Eski: 1.8)
+    # KATSAYILAR
+    W_TREND = 1.0     
+    W_MOMENTUM = 2.0  
+    W_VOLUME = 1.5    
+    W_PATTERN = 1.5   
 
-    # Güvenli veri erişimi için yardımcılar
     def get_val(key, default=0):
         val = data.get(key, default)
         return val if pd.notna(val) else default
@@ -895,15 +887,12 @@ def calculate_decision_score(data, weekly_data=None):
     bb_upper = get_val('bb_upper')
     
     # ─── EXTRA HESAPLAMALAR ───
-    # Fiyatın EMA50'den uzaklığı (Extension)
     dist_to_ema50 = 0
     if ema50 > 0:
         dist_to_ema50 = ((price - ema50) / ema50) * 100
     
-    # 1. TIER: TREND ANALİZİ (Ichimoku & EMA)
+    # 1. TIER: TREND ANALİZİ
     trend_score = 0
-    
-    # Ichimoku Bulut Kontrolü
     cloud_top = max(span_a, span_b)
     cloud_bottom = min(span_a, span_b)
     
@@ -912,72 +901,48 @@ def calculate_decision_score(data, weekly_data=None):
     
     if is_above_cloud:
         trend_score += 15
-        reasons.append("Fiyat Bulut Üstünde (Güçlü Trend)")
+        reasons.append("Fiyat Bulut Üstünde")
     elif is_below_cloud:
         trend_score -= 15
-        reasons.append("Fiyat Bulut Altında (Düşüş Trendi)")
     
-    # EMA Trendi
     if ema50 > ema200:
-        if price > ema50:
-            trend_score += 10
-            reasons.append("Golden Cross Bölgesi")
-        elif price < ema50:
-            trend_score += 5 # Düzeltme
+        if price > ema50: trend_score += 10
+        elif price < ema50: trend_score += 5
     else:
         trend_score -= 10
 
-    # Haftalık Teyit
     if weekly_data and weekly_data.get('ema_cross') == "BOĞA":
         trend_score += 10
-    elif weekly_data: # Veri var ama Boğa değilse
+    elif weekly_data: 
         trend_score -= 10
 
-    # AŞIRI UZAMA CEZASI (Extension Penalty - Sıkılaştırıldı)
-    if dist_to_ema50 > 8:  # %15 -> %8'e sıkıştırıldı
-        trend_score -= 25  # Daha yüksek ceza
-        reasons.append("EMA50'den Aşırı Uzak (Riskli)")
-    elif dist_to_ema50 > 5:
-        trend_score -= 10
-        reasons.append("EMA50'den Uzaklaşıyor")
+    # UZAMA CEZASI (Gevşetildi: %15)
+    if dist_to_ema50 > 15:  
+        trend_score -= 25  
+        reasons.append("EMA50'den Çok Uzak")
 
     # 2. TIER: MOMENTUM
     mom_score = 0
+    if rsi > 50 and is_above_cloud: mom_score += 5
+    elif rsi < 50 and is_below_cloud: mom_score -= 5
     
-    # RSI & Bulut İlişkisi
-    if rsi > 50 and is_above_cloud:
-        mom_score += 5
-    elif rsi < 50 and is_below_cloud:
-        mom_score -= 5
-    
-    # Divergence
     div = data.get('divergence', 'YOK')
     if div == "NEGATİF":
-        mom_score -= 30 # Ceza artırıldı
+        mom_score -= 30
         reasons.append("Negatif Uyumsuzluk")
     elif div == "POZİTİF":
         mom_score += 25
         reasons.append("Pozitif Uyumsuzluk")
         
-    # Pullback Fırsatı (Trend yukarı, RSI soğumuş)
-    if price > sma50 and rsi < 45: # Tolerans artırıldı (40->45)
+    if price > sma50 and rsi < 45:
         mom_score += 25
-        reasons.append("Trend İçi Ucuzluk (Pullback)")
+        reasons.append("Trend İçi Fırsat")
     
-    # Aşırı Alım (KILL SWITCH - Sıkılaştırıldı)
-    if rsi > 70:
-        mom_score -= 25  # Daha yüksek ceza (-15 -> -25)
-        if price > bb_upper:
-            mom_score -= 25  # Daha yüksek ceza (-20 -> -25)
-            reasons.append("Aşırı Alım + BB Dışı (Tehlike!)")
-        else:
-            reasons.append("RSI > 70 (Aşırı Alım)")
-
     # 3. TIER: HACİM
     vol_score = 0
     if cmf > 0.10:
         vol_score += 15
-        reasons.append("Balina Girişi (CMF+)")
+        reasons.append("Balina Girişi")
     elif cmf < -0.10:
         vol_score -= 15
         
@@ -989,10 +954,9 @@ def calculate_decision_score(data, weekly_data=None):
     pat_score = 0
     if bb_width < 8:
         pat_score += 5
-        reasons.append("Volatilite Sıkışması")
         if trend_score > 0 and vol_score > 0:
             pat_score += 20
-            reasons.append("Sıkışma Yukarı Kırılıyor")
+            reasons.append("Sıkışma Kırılımı")
 
     # Hesaplama
     final_raw = (trend_score * W_TREND) + (mom_score * W_MOMENTUM) + \
@@ -1000,30 +964,29 @@ def calculate_decision_score(data, weekly_data=None):
                 
     normalized_score = base_score + max(-50, min(50, final_raw))
     
-    # ─── HARD CAP RULES (Aşırı Alım Freni - Sıkılaştırıldı) ───
-    if rsi > 80:
-        normalized_score = min(normalized_score, 50)  # BEKLE sinyali ver (55 -> 50)
-        reasons.append("RSI > 80 (Tehlikeli Bölge)")
-    elif rsi > 75:
-        normalized_score = min(normalized_score, 55)  # Asla 'AL' verme (70 -> 55)
-        reasons.append("RSI > 75 (Aşırı Alım)")
-    elif rsi > 70:
-        normalized_score = min(normalized_score, 65)  # Yeni: RSI > 70 için de fren
-        reasons.append("RSI > 70 (Dikkatli Ol)")
+    # ─── AKILLI LİMİT (Optimized Cap Rules) ───
+    # Robotun rsi_limit ayarına göre fren yapması sağlanır
     
-    # ─── HAFTALIK TREND TEYİDİ (Yeni) ───
+    if rsi > (rsi_limit + 5): # Örn: Limit 85 ise 90'da durur
+        normalized_score = min(normalized_score, 50)
+        reasons.append(f"RSI > {rsi_limit+5} (Aşırı Isınma)")
+    elif rsi > rsi_limit:     # Örn: Limit 85 ise 85'e kadar AL verir
+        normalized_score = min(normalized_score, 60)
+        reasons.append(f"RSI > {rsi_limit} (Dikkat)")
+    
+    # Haftalık ayı ise asla AL verme
     if weekly_data and weekly_data.get('ema_cross') == "AYI":
-        normalized_score = min(normalized_score, 55)  # Haftalık ayı ise asla AL verme
-        reasons.append("Haftalık Trend AYI (Blok)")
+        normalized_score = min(normalized_score, 55)
+        reasons.append("Haftalık Trend AYI")
         
     return int(normalized_score), reasons
 
-def calculate_smart_score(data, weekly_data=None, atr_mult=None, tp_ratio=None):
+def calculate_smart_score(data, weekly_data=None, atr_mult=None, tp_ratio=None, rsi_limit=75):
     """
-    Kullanıcı arayüzü için skor ve sinyal hesaplar.
-    Optimize edilmiş parametreler (atr_mult, tp_ratio) opsiyonel olarak alınabilir.
+    rsi_limit parametresi eklendi.
     """
-    score, reasons = calculate_decision_score(data, weekly_data)
+    # Karar skorunu optimize edilmiş RSI limitiyle hesapla
+    score, reasons = calculate_decision_score(data, weekly_data, rsi_limit=rsi_limit)
     
     # Renk ve Etiket
     if score >= 80:
@@ -1432,7 +1395,8 @@ with tab_analiz:
             backtest_results = run_robust_backtest(
                 target_symbol.upper().strip(), 
                 atr_mult=best_params['atr_multiplier'],
-                tp_ratio=best_params['take_profit_ratio']
+                tp_ratio=best_params['take_profit_ratio'],
+                rsi_limit=best_params['rsi_limit'] # YENİ
             )
         
         if data:
@@ -1442,7 +1406,8 @@ with tab_analiz:
                 data, 
                 weekly_data, 
                 atr_mult=best_params['atr_multiplier'],
-                tp_ratio=best_params['take_profit_ratio']
+                tp_ratio=best_params['take_profit_ratio'],
+                rsi_limit=best_params['rsi_limit'] # YENİ
             )
             
             # Karar Paneli
