@@ -1094,38 +1094,15 @@ BIST_STOCKS = [
 
 @st.cache_data(ttl=60, show_spinner=False)
 def scan_single_stock(symbol):
-    """Tek bir hisseyi tarar ve sonucu döndürür (Optimize Edilmiş Versiyon)"""
+    """Tek bir hisseyi tarar ve sonucu döndürür"""
     try:
-        # 1. Önce bu hisse için çalışan kârlı bir strateji var mı?
-        # (Bu işlem her hisse için yaklaşık 0.5 - 1 saniye sürer)
-        opt_result = find_best_strategy(symbol)
-        
-        # Eğer optimizasyon sonucu yoksa veya strateji ZARAR ediyorsa listeye alma
-        if not opt_result or not opt_result.get('is_profitable', False):
-            return None 
-            
-        best_p = opt_result['params']
-        
-        # 2. Verileri EN İYİ parametrelere göre çek (Örn: RSI 9 mu 14 mü?)
-        data = get_advanced_data(symbol, rsi_period=best_p['rsi_period'])
+        data = get_advanced_data(symbol)
         if data is None:
             return None
         
         weekly_data = get_weekly_trend(symbol)
+        score, signal, color, reasons, risk_levels = calculate_smart_score(data, weekly_data)
         
-        # 3. Skoru hesaplarken optimize edilmiş EŞİK değerlerini kullan
-        score, signal, color, reasons, risk_levels = calculate_smart_score(
-            data, 
-            weekly_data, 
-            atr_mult=best_p['atr_mult'],
-            entry_threshold=best_p['entry_threshold'] # Kişiye özel eşik
-        )
-        
-        # 4. Filtreleme: Sadece AL veya GÜÇLÜ AL olanları döndür (İsteğe bağlı)
-        # Eğer 'BEKLE'leri de görmek isterseniz bu if bloğunu kaldırabilirsiniz.
-        if score < 40: # Satış veya Nötr olanları eleyebiliriz
-             return None
-
         return {
             "Sembol": symbol.replace(".IS", ""),
             "Fiyat": data['price'],
@@ -1134,12 +1111,13 @@ def scan_single_stock(symbol):
             "Skor": score,
             "RSI": data['rsi'],
             "ADX": data['adx'],
+            "CMF": data['cmf'],
+            "Trend": data['trend_direction'],
             "Hacim": data['volume_ratio'],
-            "Backtest P/L": f"%{opt_result['pnl']:.1f}", # Listede geçmiş performansını da gösterelim
             "_color": color,
             "_score": score
         }
-    except Exception as e:
+    except:
         return None
 
 def scan_market(stock_list, progress_callback=None):
@@ -1477,15 +1455,11 @@ with tab_scanner:
             df_results = pd.DataFrame(results)
             
             # Görüntüleme için sütunları seç ve formatla
-            display_df = df_results[[
-                "Sembol", "Fiyat", "Değişim %", "Sinyal", "Skor", 
-                "Backtest P/L", "RSI", "Hacim"
-            ]].copy()
-            
-            # Formatlamalar
+            display_df = df_results[["Sembol", "Fiyat", "Değişim %", "Sinyal", "Skor", "RSI", "ADX", "Trend", "Hacim"]].copy()
             display_df["Fiyat"] = display_df["Fiyat"].apply(lambda x: f"{x:.2f} ₺")
             display_df["Değişim %"] = display_df["Değişim %"].apply(lambda x: f"{x:+.2f}%")
             display_df["RSI"] = display_df["RSI"].apply(lambda x: f"{x:.1f}")
+            display_df["ADX"] = display_df["ADX"].apply(lambda x: f"{x:.1f}")
             display_df["Hacim"] = display_df["Hacim"].apply(lambda x: f"{x:.2f}x")
             
             # Sinyal renklerini belirle
