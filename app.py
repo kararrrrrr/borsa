@@ -522,7 +522,7 @@ def get_weekly_trend(symbol):
 # 3.6 PROFESYONEL BACKTEST & OPTİMİZASYON (Robust Sharpe & Drawdown)
 # ═══════════════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=600)
-def run_robust_backtest(symbol):
+def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
     """
     MATRIX BACKTEST MOTORU (Düzeltilmiş Versiyon)
     - Ichimoku + EMA Trend Takibi
@@ -608,22 +608,29 @@ def run_robust_backtest(symbol):
         span_b = df['SpanB'].values
         adx = df['ADX'].values
         
-        # Stop Takibi
+        # Stop Takibi ve Kar Al
         trailing_stop_price = 0
+        take_profit_price = 0  # YENİ
         entry_price = 0
         
         for i in range(len(df) - 1):
-            # Mevcut fiyatlar
             current_close = closes[i]
-            current_date = dates[i]
             
-            # ─── ÇIKIŞ MANTIĞI (Trailing Stop) ───
+            # ─── ÇIKIŞ MANTIĞI ───
             if in_position:
-                # 1. Stop Kontrolü (Trailing)
+                # 1. KAR AL (Take Profit) - YENİ EKLENTİ
+                # Eğer tp_ratio > 0 ise ve fiyat hedefi vurduysa
+                if tp_ratio > 0 and highs[i] >= take_profit_price:
+                     exit_price = take_profit_price
+                     cash += position * exit_price * (1 - commission)
+                     wins += 1
+                     position = 0
+                     in_position = False
+                     continue
+
+                # 2. Stop Kontrolü (Trailing) - GÜNCELLENDİ (atr_mult parametresi ile)
                 if lows[i] < trailing_stop_price:
-                    # Stop olduk
                     exit_price = trailing_stop_price
-                    # Kayma (Slippage) hesabı: Stop fiyatının biraz altından satılır genelde
                     if opens[i] < trailing_stop_price: exit_price = opens[i] 
                     
                     cash += position * exit_price * (1 - commission)
@@ -632,14 +639,12 @@ def run_robust_backtest(symbol):
                     in_position = False
                     continue
                 
-                # 2. Stop Güncelleme (Fiyat yükseldikçe stopu yukarı çek)
-                # 3 ATR Trailing Stop
-                new_stop = current_close - (3 * atr[i])
+                # 3. Stop Güncelleme (Trailing) - GÜNCELLENDİ
+                new_stop = current_close - (atr_mult * atr[i]) # 3 yerine atr_mult kullan
                 if new_stop > trailing_stop_price:
                     trailing_stop_price = new_stop
-                    
-                # 3. Acil Çıkış (Trendin tamamen çökmesi)
-                # Fiyat EMA200'ün %3 altına sarkarsa bekleme kaç
+
+                # 4. Acil Çıkış (Trendin tamamen çökmesi) - EMA200
                 if current_close < ema200[i] * 0.97:
                     exit_price = current_close
                     cash += position * exit_price * (1 - commission)
@@ -648,7 +653,7 @@ def run_robust_backtest(symbol):
                     in_position = False
                     continue
 
-            # ─── GİRİŞ MANTIĞI (Daha Agresif Matrix) ───
+            # ─── GİRİŞ MANTIĞI ───
             if not in_position:
                 score = 0
                 
@@ -671,10 +676,9 @@ def run_robust_backtest(symbol):
                 # Trend yukarı ama RSI kısa vadeli düşmüş (Alım fırsatı)
                 if current_close > ema200[i] and rsi[i] < 45: score += 25
                 
-                # ALIM EŞİĞİ: 60 Puan (Daha düşük eşik = Daha çok işlem)
-                # Not: "Mükemmel"i beklemek borsada fırsat kaçırtır. "İyi" yeterlidir.
+                # ALIM EŞİĞİ
                 if score >= 60:
-                    entry_price = opens[i+1] # Ertesi gün açılıştan al
+                    entry_price = opens[i+1]
                     size = cash / entry_price
                     cost = size * entry_price * (1 + commission)
                     cash -= cost
@@ -682,8 +686,15 @@ def run_robust_backtest(symbol):
                     in_position = True
                     trades_count += 1
                     
-                    # İlk Stop Seviyesi (3 ATR altı)
-                    trailing_stop_price = entry_price - (3 * atr[i])
+                    # Stop ve TP Belirleme - GÜNCELLENDİ
+                    risk = atr_mult * atr[i]
+                    trailing_stop_price = entry_price - risk
+                    
+                    # Kar Al Fiyatını Belirle (Risk * Ratio)
+                    if tp_ratio > 0:
+                        take_profit_price = entry_price + (risk * tp_ratio)
+                    else:
+                        take_profit_price = 999999 # TP yoksa ulaşılmaz yap
                 
         final_value = cash + (position * closes[-1] if in_position else 0)
         total_return = ((final_value - initial_capital) / initial_capital) * 100
@@ -700,13 +711,46 @@ def run_robust_backtest(symbol):
 
 def optimize_strategy_robust(symbol):
     """
-    Optimizasyon Hedefi: Maksimum Kâr DEĞİL, Maksimum Sharpe Oranı (Güvenilirlik).
-    NOT: Smart Score backtest mantığı sabit parametrelerle çalıştığı için 
-    optimizasyon şimdilik devre dışı bırakılmıştır.
+    Basit Grid Search ile en iyi parametreleri bulur.
+    Denenenler: ATR Çarpanı (Stop), RSI Periyodu
     """
-    # Yeni backtest mantığı parametre kabul etmiyor (Smart Score sabit kurallı),
-    # bu nedenle optimizasyon fonksiyonu şimdilik varsayılan değerleri döndürüyor.
-    return {'rsi_period': 14, 'ema_period': 200, 'rsi_threshold': 40}
+    try:
+        # Taranacak parametre aralıkları
+        param_grid = {
+            'atr_multiplier': [2.0, 2.5, 3.0, 3.5], # Stop mesafesi seçenekleri
+            'rsi_period': [14],                     # RSI periyodu (Genelde 14 iyidir, sabit kalabilir)
+            'take_profit_ratio': [1.5, 2.0, 3.0]    # Risk/Ödül oranı
+        }
+        
+        best_score = -9999
+        best_params = {
+            'atr_multiplier': 3.0, 
+            'rsi_period': 14,
+            'take_profit_ratio': 2.0
+        }
+
+        # Kombinasyonları dene
+        for atr_mult in param_grid['atr_multiplier']:
+            for tp_ratio in param_grid['take_profit_ratio']:
+                # Mevcut backtest fonksiyonunu parametreli çağıracak şekilde güncellemeliyiz
+                # (Aşağıda run_robust_backtest'i de güncelleyeceğiz)
+                result = run_robust_backtest(symbol, atr_mult=atr_mult, tp_ratio=tp_ratio)
+                
+                if result and 'total_pnl' in result:
+                    # Başarı kriteri: Hem PNL yüksek olsun hem de en az 5 işlem yapmış olsun
+                    if result['total_trades'] > 5:
+                        score = result['total_pnl']
+                        if score > best_score:
+                            best_score = score
+                            best_params = {
+                                'atr_multiplier': atr_mult,
+                                'rsi_period': 14,
+                                'take_profit_ratio': tp_ratio
+                            }
+                            
+        return best_params
+    except Exception as e:
+        return {'atr_multiplier': 3.0, 'rsi_period': 14, 'take_profit_ratio': 2.0}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. SİNYAL SKOR HESAPLAMA
@@ -1131,11 +1175,19 @@ with tab_analiz:
     # Analiz Butonu Tıklandığında
     if st.session_state.analyzed:
         target_symbol = st.session_state.symbol
-        with st.spinner(""):
+        with st.spinner("Yapay zeka verileri işliyor ve optimizasyon yapıyor..."):
             data = get_advanced_data(target_symbol.upper().strip())
             weekly_data = get_weekly_trend(target_symbol.upper().strip())
-            # VectorBT ile Profesyonel Backtest
-            backtest_results = run_robust_backtest(target_symbol.upper().strip())
+            
+            # ÖNCE OPTİMİZASYON YAP
+            best_params = optimize_strategy_robust(target_symbol.upper().strip())
+            
+            # SONRA BU PARAMETRELERLE BACKTEST ÇALIŞTIR
+            backtest_results = run_robust_backtest(
+                target_symbol.upper().strip(), 
+                atr_mult=best_params['atr_multiplier'],
+                tp_ratio=best_params['take_profit_ratio']
+            )
         
         if data:
             # ═══ SİNYAL SKORU (SNIPER ALGORİTMASI v3 - Multi-Timeframe) ═══
@@ -1316,9 +1368,9 @@ with tab_analiz:
                     best_params = optimize_strategy_robust(target_symbol.upper().strip())
                     st.success("✅ Optimizasyon Tamamlandı! En yüksek getiri sağlayan ayarlar:")
                     c1, c2, c3 = st.columns(3)
-                    c1.metric("RSI Periyodu", best_params.get('rsi_period', 14))
-                    c2.metric("RSI Eşik", best_params.get('rsi_threshold', 40))
-                    c3.metric("EMA Trend", best_params.get('ema_period', 200))
+                    c1.metric("ATR Çarpanı (Stop)", best_params.get('atr_multiplier', 3.0))
+                    c2.metric("Kar Al Oranı", best_params.get('take_profit_ratio', 2.0))
+                    c3.metric("RSI Periyodu", best_params.get('rsi_period', 14))
                     st.info(f"💡 {target_symbol} için bu parametreler geçmişte en yüksek kârlılığı sağladı.")
                 
         else:
