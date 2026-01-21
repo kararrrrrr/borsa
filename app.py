@@ -332,6 +332,49 @@ def get_advanced_data(symbol):
         df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
         df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
         
+        # ─── ICHIMOKU BULUTU (Japon Trend Ustası) ───
+        # Conversion Line (Tenkan-sen): 9 periyotluk ortalama
+        nine_period_high = df['High'].rolling(window=9).max()
+        nine_period_low = df['Low'].rolling(window=9).min()
+        df['Tenkan'] = (nine_period_high + nine_period_low) / 2
+
+        # Base Line (Kijun-sen): 26 periyotluk ortalama
+        period26_high = df['High'].rolling(window=26).max()
+        period26_low = df['Low'].rolling(window=26).min()
+        df['Kijun'] = (period26_high + period26_low) / 2
+
+        # Leading Span A (Senkou Span A)
+        df['SpanA'] = ((df['Tenkan'] + df['Kijun']) / 2).shift(26)
+
+        # Leading Span B (Senkou Span B)
+        period52_high = df['High'].rolling(window=52).max()
+        period52_low = df['Low'].rolling(window=52).min()
+        df['SpanB'] = ((period52_high + period52_low) / 2).shift(26)
+        
+        # ─── KELTNER KANALLARI (Volatilite Patlaması İçin) ───
+        df['Keltner_Mid'] = df['Close'].ewm(span=20).mean()
+        df['Keltner_Upper'] = df['Keltner_Mid'] + (2 * df['ATR'])
+        df['Keltner_Lower'] = df['Keltner_Mid'] - (2 * df['ATR'])
+        
+        # ─── RSI UYUMSUZLUK (Divergence) KONTROLÜ ───
+        # Son 20 gündeki RSI ve Fiyat tepelerini karşılaştır
+        last_20 = df.tail(20)
+        price_max_idx = last_20['Close'].idxmax()
+        rsi_max_idx = last_20['RSI'].idxmax()
+        
+        divergence_signal = "YOK"
+        # Eğer Fiyat tepesi RSI tepesinden daha yeniyse (Negatif Uyumsuzluk)
+        if df.loc[price_max_idx, 'Close'] > df.loc[rsi_max_idx, 'Close']:
+            if df.loc[price_max_idx, 'RSI'] < df.loc[rsi_max_idx, 'RSI']:
+                divergence_signal = "NEGATİF"
+        
+        # Pozitif uyumsuzluk kontrolü (Fiyat düşerken RSI yükseliyorsa)
+        price_min_idx = last_20['Close'].idxmin()
+        rsi_min_idx = last_20['RSI'].idxmin()
+        if df.loc[price_min_idx, 'Close'] < df.loc[rsi_min_idx, 'Close']:
+            if df.loc[price_min_idx, 'RSI'] > df.loc[rsi_min_idx, 'RSI']:
+                divergence_signal = "POZİTİF"
+
         # ─── Destek ve Direnç Seviyeleri ───
         recent = df.tail(60)
         support = recent['Low'].min()
@@ -406,6 +449,17 @@ def get_advanced_data(symbol):
             # Trend
             "trend_direction": trend_direction,
             "trend_strength": trend_strength,
+            # Ichimoku
+            "tenkan": curr['Tenkan'],
+            "kijun": curr['Kijun'],
+            "span_a": curr['SpanA'],
+            "span_b": curr['SpanB'],
+            # Keltner
+            "keltner_upper": curr['Keltner_Upper'],
+            "keltner_lower": curr['Keltner_Lower'],
+            "keltner_mid": curr['Keltner_Mid'],
+            # Divergence
+            "divergence": divergence_signal,
         }
     except Exception as e:
         return None
@@ -647,149 +701,154 @@ def optimize_strategy_robust(symbol):
 # ═══════════════════════════════════════════════════════════════════════════════
 def calculate_smart_score(data, weekly_data=None):
     """
-    SNIPER STRATEJİSİ v3:
-    - ADX filtresi ile yatay piyasada sinyal vermez
-    - ATR ile dinamik stop-loss ve kar al seviyeleri
-    - Haftalık trend teyidi ile çoklu zaman dilimi analizi
-    - Trend + Momentum + Akıllı Para kombinasyonu
+    MATRIX ALGORİTMASI v4:
+    - Lineer toplama yerine Ağırlıklı Çarpan (Weighted Multiplier) sistemi.
+    - Uyumsuzluk (Divergence) taraması.
+    - Ichimoku Bulut sistemi entegrasyonu.
     """
+    base_score = 50
     score = 0
     reasons = []
     
-    # ═══ HAFTALIK TEYİT (Multi-Timeframe) ═══
-    weekly_aligned = True
+    # KATSAYILAR (Önem derecesine göre ağırlıklar)
+    W_TREND = 2.0      # Trend her şeydir
+    W_MOMENTUM = 1.5   # Dönüş sinyalleri
+    W_VOLUME = 1.2     # Teyit mekanizması
+    W_PATTERN = 1.8    # Ichimoku ve formasyonlar
+
+    # 1. TIER: TREND ANALİZİ (Ichimoku & EMA)
+    trend_score = 0
+    
+    # Fiyat Bulutun Neresinde? (En güçlü trend filtresi)
+    span_a = data.get('span_a', 0)
+    span_b = data.get('span_b', 0)
+    
+    # NaN kontrolü yap
+    if span_a is None or (isinstance(span_a, float) and np.isnan(span_a)):
+        span_a = 0
+    if span_b is None or (isinstance(span_b, float) and np.isnan(span_b)):
+        span_b = 0
+    
+    is_above_cloud = data['price'] > max(span_a, span_b) if (span_a > 0 and span_b > 0) else False
+    is_below_cloud = data['price'] < min(span_a, span_b) if (span_a > 0 and span_b > 0) else False
+    
+    if is_above_cloud:
+        trend_score += 15
+        reasons.append("Fiyat Bulut Üstünde (Güçlü Trend)")
+    elif is_below_cloud:
+        trend_score -= 15
+        reasons.append("Fiyat Bulut Altında (Düşüş Trendi)")
+    
+    # EMA Sıralaması (Kusursuz Boğa Dizilimi)
+    if data['ema50'] > data['ema200']:
+        if data['price'] > data['ema50']:
+            trend_score += 10
+            reasons.append("Golden Cross Bölgesi")
+        elif data['price'] < data['ema50']:
+             # Trend var ama düzeltme yapıyor
+             trend_score += 5 
+    else:
+        trend_score -= 10
+
+    # Haftalık Teyit
     if weekly_data:
         if weekly_data['ema_cross'] == "BOĞA":
-            score += 10
-            reasons.append("Haftalık Trend BOĞA (+10)")
+            trend_score += 10
         else:
-            score -= 10
-            reasons.append("Haftalık Trend AYI (-10)")
-            weekly_aligned = False
+            trend_score -= 10
+
+    # 2. TIER: MOMENTUM & UYUMSUZLUK (Divergence)
+    mom_score = 0
     
-    # ═══ ADX TREND GÜCÜ FİLTRESİ ═══
-    # ADX < 20: Trend yok, yatay piyasa - sinyallere güvenme
-    # ADX 20-25: Zayıf trend
-    # ADX > 25: Güçlü trend
+    # RSI Trend Uyumu
+    if data['rsi'] > 50 and is_above_cloud:
+        mom_score += 5
+    elif data['rsi'] < 50 and is_below_cloud:
+        mom_score -= 5
     
-    adx_value = data['adx']
-    is_trending = adx_value > 20
-    is_strong_trend = adx_value > 25
+    # Divergence Kontrolü
+    divergence = data.get('divergence', 'YOK')
+    if divergence == "NEGATİF":
+        mom_score -= 25
+        reasons.append("Negatif Uyumsuzluk (Dikkat!)")
+    elif divergence == "POZİTİF":
+        mom_score += 25
+        reasons.append("Pozitif Uyumsuzluk (Fırsat!)")
+        
+    # Trend İçi Pullback (En Değerli Sinyal)
+    if data['price'] > data['sma50'] and data['rsi'] < 40:
+        mom_score += 25
+        reasons.append("Trend İçi Ucuzluk (Pullback Fırsatı)")
     
-    if not is_trending:
-        # Yatay piyasa - tüm trend sinyallerinin ağırlığını düşür
-        reasons.append(f"ADX {adx_value:.0f} - Trend Yok (Dikkat)")
-    elif is_strong_trend:
-        reasons.append(f"ADX {adx_value:.0f} - Güçlü Trend")
-    else:
-        reasons.append(f"ADX {adx_value:.0f} - Zayıf Trend")
+    if data['price'] > data['bb_upper'] and data['rsi'] > 75:
+        mom_score -= 20
+        reasons.append("Aşırı Alım + Bollinger Dışı")
 
-    # 1. ANA TREND FİLTRESİ (ADX ile ağırlıklandırılmış)
-    if data['price'] > data['ema200']:
-        if is_strong_trend:
-            score += 25
-            reasons.append("Güçlü Boğa Trendi (+25)")
-        elif is_trending:
-            score += 15
-            reasons.append("Zayıf Boğa Trendi (+15)")
-        else:
-            score += 5  # Yatay piyasada düşük ağırlık
-            reasons.append("EMA200 Üstü (+5)")
-    else:
-        if is_strong_trend:
-            score -= 25
-            reasons.append("Güçlü Ayı Trendi (-25)")
-        elif is_trending:
-            score -= 15
-            reasons.append("Zayıf Ayı Trendi (-15)")
-        else:
-            score -= 5
-            reasons.append("EMA200 Altı (-5)")
+    # 3. TIER: HACİM & PARA AKIŞI
+    vol_score = 0
+    if data['cmf'] > 0.10:
+        vol_score += 15
+        reasons.append("Balina Girişi (CMF > 0.10)")
+    elif data['cmf'] < -0.10:
+        vol_score -= 15
+        
+    if data['volume_ratio'] > 2.0 and data['change_pct'] > 0:
+        vol_score += 10
+        reasons.append("Hacim Patlaması (x2)")
 
-    # 2. MOMENTUM (Sadece trend varken geçerli)
-    if is_trending:
-        if data['price'] > data['ema200']:
-            if data['rsi'] < 40:
-                score += 20
-                reasons.append("Pullback Fırsatı (+20)")
-            elif data['rsi'] > 70:
-                score -= 10
-                reasons.append("Aşırı Isınma (-10)")
-        else:
-            if data['rsi'] < 40:
-                score -= 10
-                reasons.append("Düşen Bıçak (-10)")
+    # 4. TIER: VOLATİLİTE SIKIŞMASI (Squeeze)
+    pat_score = 0
+    if data['bb_width'] < 8:
+        pat_score += 5
+        reasons.append("Sıkışma (Enerji Birikiyor)")
+        
+        # Sıkışma varken trend ve hacim varsa puanı katla
+        if trend_score > 0 and vol_score > 0:
+            pat_score += 20
+            reasons.append("Sıkışma Yukarı Kırılıyor!")
 
-    # 3. AKILLI PARA (CMF)
-    if data['cmf'] > 0.05:
-        score += 15
-        reasons.append("Para Girişi (+15)")
-    elif data['cmf'] < -0.05:
-        score -= 15
-        reasons.append("Para Çıkışı (-15)")
-
-    # 4. HACİM
-    if data['volume_ratio'] > 1.5:
-        if data['change_pct'] > 0:
-            score += 10
-            reasons.append("Hacimli Yükseliş (+10)")
-        else:
-            score -= 10
-            reasons.append("Hacimli Düşüş (-10)")
-
-    # 5. MACD
-    if data['macd'] > data['macd_signal']:
-        score += 10
-    else:
-        score -= 10
-
-    # 6. BOLLINGER SIKIŞMASI
-    if data['bb_width'] < 10:
-        reasons.append("Sıkışma (Patlama Yakın)")
-        if data['trend_direction'] == "YUKARI":
-            score += 5
-        else:
-            score -= 5
-
-    # NORMALİZASYON
-    final_score = 50 + score
-    final_score = max(0, min(100, final_score))
-
-    # ═══ YATAY PİYASA KORUMASI ═══
-    # ADX < 20 ise ve skor 40-60 arasındaysa BEKLE'ye zorla
-    if not is_trending and 35 < final_score < 65:
-        final_score = 50
-        reasons.append("Yatay Piyasa → Bekle")
-
-    # KARAR MEKANİZMASI
-    if final_score >= 75:
+    # ─── TOPLAM SKOR HESAPLAMA (Ağırlıklı) ───
+    final_raw_score = (trend_score * W_TREND) + \
+                      (mom_score * W_MOMENTUM) + \
+                      (vol_score * W_VOLUME) + \
+                      (pat_score * W_PATTERN)
+                      
+    # Normalizasyon (50 taban puana ekle)
+    # Skor çok uçuk çıkabilir, -50 ile +50 arasına sıkıştıracağız
+    normalized_score = base_score + max(-50, min(50, final_raw_score))
+    
+    # ─── FİNAL KARAR & RENK ───
+    if normalized_score >= 80:
         signal = "GÜÇLÜ AL"
         color = "#10b981"
-    elif final_score >= 60:
+    elif normalized_score >= 60:
         signal = "AL"
         color = "#34d399"
-    elif final_score <= 25:
+    elif normalized_score <= 20:
         signal = "GÜÇLÜ SAT"
         color = "#ef4444"
-    elif final_score <= 40:
+    elif normalized_score <= 40:
         signal = "SAT"
         color = "#f87171"
     else:
         signal = "BEKLE"
         color = "#fbbf24"
 
-    # ═══ RİSK SEVİYELERİ (ATR Tabanlı) ═══
+    # Risk Yönetimi (ATR Trailing Stop)
     atr = data['atr']
     price = data['price']
     
+    # Volatiliteye göre dinamik çarpan
+    stop_mult = 2.5 if data['adx'] > 30 else 2.0
+    
     risk_levels = {
-        "stop_loss": price - (2 * atr),      # 2 ATR altı
-        "take_profit_1": price + (1.5 * atr), # 1.5 ATR (konservatif)
-        "take_profit_2": price + (3 * atr),   # 3 ATR (agresif)
-        "risk_reward": 1.5,                   # Risk/Ödül oranı
+        "stop_loss": price - (stop_mult * atr),
+        "take_profit_1": price + (stop_mult * 1.5 * atr),
+        "take_profit_2": price + (stop_mult * 3.0 * atr),
+        "risk_reward": 1.5
     }
 
-    return final_score, signal, color, reasons, risk_levels
+    return normalized_score, signal, color, reasons, risk_levels
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5. YAPAY ZEKA ANALİZ (FİLTRE-DOSTU KISA PROMPT)
