@@ -462,6 +462,7 @@ def get_advanced_data(symbol):
             "divergence": divergence_signal,
         }
     except Exception as e:
+        st.error(f"Veri Hatası ({symbol}): {str(e)}")
         return None
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -506,7 +507,8 @@ def get_weekly_trend(symbol):
             "ema20": curr['EMA20'],
             "ema50": curr['EMA50'],
         }
-    except:
+    except Exception as e:
+        st.error(f"Haftalık Veri Hatası ({symbol}): {str(e)}")
         return None
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1111,7 +1113,8 @@ def scan_single_stock(symbol):
             "_color": color,
             "_score": score
         }
-    except:
+    except Exception as e:
+        st.error(f"Tarama Hatası ({symbol}): {str(e)}")
         return None
 
 def scan_market(stock_list, progress_callback=None):
