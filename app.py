@@ -250,6 +250,167 @@ else:
     st.stop()
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 2.5 BIST HİSSE LİSTESİ (Piyasa Taraması için)
+# ═══════════════════════════════════════════════════════════════════════════════
+BIST_STOCKS = [
+    "THYAO.IS", "GARAN.IS", "AKBNK.IS", "EREGL.IS", "ASELS.IS",
+    "KCHOL.IS", "SAHOL.IS", "ISCTR.IS", "TUPRS.IS", "SISE.IS",
+    "FROTO.IS", "BIMAS.IS", "TOASO.IS", "PGSUS.IS", "TCELL.IS",
+    "EKGYO.IS", "KOZAL.IS", "KOZAA.IS", "PETKM.IS", "TAVHL.IS",
+    "TTKOM.IS", "YKBNK.IS", "HALKB.IS", "VAKBN.IS", "DOHOL.IS",
+    "ENKAI.IS", "ARCLK.IS", "VESTL.IS", "TKFEN.IS", "MGROS.IS",
+    "ULKER.IS", "AEFES.IS", "SASA.IS", "KRDMD.IS", "GUBRF.IS",
+    "AKSEN.IS", "ODAS.IS", "KONTR.IS", "OYAKC.IS", "CIMSA.IS",
+    "TSKB.IS", "ALARK.IS", "TTRAK.IS", "OTKAR.IS", "LOGO.IS",
+    "NETAS.IS", "SOKM.IS", "BIZIM.IS", "MAVI.IS", "YUNSA.IS",
+    "KARSN.IS", "BRISA.IS", "GOLTS.IS", "GOODY.IS", "CCOLA.IS",
+    "BTCIM.IS", "AKCNS.IS", "AFYON.IS", "ALBRK.IS", "ANHYT.IS",
+    "ANSGR.IS", "BRYAT.IS", "DOAS.IS", "EGEEN.IS", "ENJSA.IS",
+    "GENIL.IS", "GLYHO.IS", "HEKTS.IS", "ISGYO.IS", "KLSER.IS",
+    "MPARK.IS", "PAPIL.IS", "QUAGR.IS", "SARKY.IS", "SELEC.IS",
+    "SMRTG.IS", "SNGYO.IS", "TMSN.IS", "TRGYO.IS", "TURSG.IS",
+]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2.6 PİYASA TARAMA FONKSİYONU
+# ═══════════════════════════════════════════════════════════════════════════════
+@st.cache_data(ttl=300, show_spinner=False)
+def scan_single_stock(symbol):
+    """Tek bir hisse için Smart Score hesapla (tarama için)"""
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="6mo")
+        
+        if hist.empty or len(hist) < 50:
+            return None
+        
+        df = hist.copy()
+        
+        # RSI
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+        
+        # EMA
+        df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+        df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
+        
+        # ADX
+        high_low = df['High'] - df['Low']
+        high_close = np.abs(df['High'] - df['Close'].shift())
+        low_close = np.abs(df['Low'] - df['Close'].shift())
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        plus_dm = df['High'].diff()
+        minus_dm = df['Low'].diff()
+        plus_dm[plus_dm < 0] = 0
+        minus_dm[minus_dm > 0] = 0
+        tr14 = tr.rolling(window=14).sum()
+        plus_di = 100 * (plus_dm.rolling(window=14).sum() / tr14)
+        minus_di = 100 * (np.abs(minus_dm).rolling(window=14).sum() / tr14)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        df['ADX'] = dx.rolling(window=14).mean()
+        
+        # CMF
+        mfv = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / (df['High'] - df['Low'])
+        mfv = mfv.fillna(0)
+        volume_mfv = mfv * df['Volume']
+        df['CMF'] = volume_mfv.rolling(20).sum() / df['Volume'].rolling(20).sum()
+        
+        df = df.dropna()
+        if len(df) < 5:
+            return None
+        
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        # Smart Score Hesaplama (Basitleştirilmiş)
+        score = 50
+        
+        # Trend
+        if curr['Close'] > curr['EMA200']:
+            score += 20
+        else:
+            score -= 20
+        
+        # ADX
+        if curr['ADX'] > 25:
+            score += 10
+        elif curr['ADX'] < 20:
+            score -= 10
+        
+        # CMF
+        if curr['CMF'] > 0.05:
+            score += 15
+        elif curr['CMF'] < -0.05:
+            score -= 15
+        
+        # RSI Pullback
+        if curr['Close'] > curr['EMA200'] and curr['RSI'] < 45:
+            score += 15
+        
+        # EMA Cross
+        if curr['EMA50'] > curr['EMA200']:
+            score += 5
+        else:
+            score -= 5
+        
+        score = max(0, min(100, score))
+        
+        # Sinyal
+        if score >= 75:
+            signal = "GÜÇLÜ AL"
+            color = "#10b981"
+        elif score >= 60:
+            signal = "AL"
+            color = "#34d399"
+        elif score <= 25:
+            signal = "GÜÇLÜ SAT"
+            color = "#ef4444"
+        elif score <= 40:
+            signal = "SAT"
+            color = "#f87171"
+        else:
+            signal = "BEKLE"
+            color = "#fbbf24"
+        
+        # Fiyat değişimi
+        change_pct = ((curr['Close'] - prev['Close']) / prev['Close']) * 100
+        
+        return {
+            "symbol": symbol.replace(".IS", ""),
+            "name": ticker.info.get('shortName', symbol.replace(".IS", "")),
+            "price": curr['Close'],
+            "change_pct": change_pct,
+            "score": score,
+            "signal": signal,
+            "signal_color": color,
+            "rsi": curr['RSI'],
+            "adx": curr['ADX'],
+            "cmf": curr['CMF']
+        }
+    except Exception as e:
+        return None
+
+def scan_all_stocks(progress_bar=None):
+    """Tüm BIST hisselerini tara ve Smart Score'a göre sırala"""
+    results = []
+    total = len(BIST_STOCKS)
+    
+    for i, symbol in enumerate(BIST_STOCKS):
+        if progress_bar:
+            progress_bar.progress((i + 1) / total, text=f"Taranıyor: {symbol.replace('.IS', '')} ({i+1}/{total})")
+        
+        result = scan_single_stock(symbol)
+        if result:
+            results.append(result)
+    
+    # Score'a göre sırala (en yüksekten en düşüğe)
+    results.sort(key=lambda x: x['score'], reverse=True)
+    return results
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 3. GELİŞMİŞ TEKNİK ANALİZ MOTORU
 # ═══════════════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=120)
@@ -957,26 +1118,34 @@ st.markdown('''
 </div>
 ''', unsafe_allow_html=True)
 
-# Input Alanı
-col1, col2, col3 = st.columns([1, 2, 1])
-with col2:
-    input_col, btn_col = st.columns([3, 1])
-    with input_col:
-        symbol = st.text_input(
-            "Hisse Kodu",
-            value="THYAO.IS",
-            label_visibility="collapsed",
-            placeholder="Sembol girin (THYAO.IS, GARAN.IS)"
-        )
-    with btn_col:
-        analyze_click = st.button("ANALIZ", type="primary", use_container_width=True)
+# ═══ MOD SEÇİMİ (Tekli Analiz vs Piyasa Taraması) ═══
+tab1, tab2 = st.tabs(["📊 Tekli Analiz", "🔍 Piyasa Taraması"])
 
-if 'analyzed' not in st.session_state:
-    st.session_state.analyzed = False
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 1: TEKLİ ANALİZ
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab1:
+    # Input Alanı
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        input_col, btn_col = st.columns([3, 1])
+        with input_col:
+            symbol = st.text_input(
+                "Hisse Kodu",
+                value="THYAO.IS",
+                label_visibility="collapsed",
+                placeholder="Sembol girin (THYAO.IS, GARAN.IS)",
+                key="single_symbol"
+            )
+        with btn_col:
+            analyze_click = st.button("ANALIZ", type="primary", use_container_width=True, key="single_analyze")
 
-if analyze_click:
-    st.session_state.analyzed = True
-    st.session_state.symbol = symbol
+    if 'analyzed' not in st.session_state:
+        st.session_state.analyzed = False
+
+    if analyze_click:
+        st.session_state.analyzed = True
+        st.session_state.symbol = symbol
 
 # Analiz Butonu Tıklandığında
 if st.session_state.analyzed:
@@ -1174,6 +1343,123 @@ if st.session_state.analyzed:
     else:
         st.error("Veri bulunamadı. Sembolü kontrol edin.")
         st.info("BIST hisseleri için .IS ekleyin. Örnek: THYAO.IS")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 2: PİYASA TARAMASI
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab2:
+    st.markdown('<div class="section-title">🔍 BIST Piyasa Taraması</div>', unsafe_allow_html=True)
+    st.caption(f"Toplam {len(BIST_STOCKS)} hisse analiz edilecek. Smart Score'a göre sıralanır.")
+    
+    scan_col1, scan_col2, scan_col3 = st.columns([1, 2, 1])
+    with scan_col2:
+        scan_click = st.button("🚀 PİYASAYI TARA", type="primary", use_container_width=True, key="scan_market")
+    
+    if scan_click or st.session_state.get('scan_results'):
+        if scan_click:
+            progress_bar = st.progress(0, text="Tarama başlıyor...")
+            with st.spinner(""):
+                results = scan_all_stocks(progress_bar)
+                st.session_state.scan_results = results
+            progress_bar.empty()
+        else:
+            results = st.session_state.scan_results
+        
+        if results:
+            st.success(f"✅ {len(results)} hisse başarıyla tarandı!")
+            
+            # Filtre seçenekleri
+            filter_col1, filter_col2 = st.columns(2)
+            with filter_col1:
+                signal_filter = st.selectbox(
+                    "Sinyal Filtresi",
+                    ["Tümü", "GÜÇLÜ AL", "AL", "BEKLE", "SAT", "GÜÇLÜ SAT"],
+                    key="signal_filter"
+                )
+            with filter_col2:
+                min_score = st.slider("Minimum Skor", 0, 100, 0, key="min_score")
+            
+            # Filtreleme
+            filtered_results = results
+            if signal_filter != "Tümü":
+                filtered_results = [r for r in filtered_results if r['signal'] == signal_filter]
+            filtered_results = [r for r in filtered_results if r['score'] >= min_score]
+            
+            st.markdown(f"**Gösterilen: {len(filtered_results)} hisse**")
+            
+            # Sonuç tablosu
+            for i, stock in enumerate(filtered_results):
+                # Renk belirleme
+                if stock['score'] >= 75:
+                    bg_color = "rgba(16, 185, 129, 0.1)"
+                    border_color = "#10b981"
+                elif stock['score'] >= 60:
+                    bg_color = "rgba(52, 211, 153, 0.1)"
+                    border_color = "#34d399"
+                elif stock['score'] <= 25:
+                    bg_color = "rgba(239, 68, 68, 0.1)"
+                    border_color = "#ef4444"
+                elif stock['score'] <= 40:
+                    bg_color = "rgba(248, 113, 113, 0.1)"
+                    border_color = "#f87171"
+                else:
+                    bg_color = "rgba(251, 191, 36, 0.1)"
+                    border_color = "#fbbf24"
+                
+                change_color = "#10b981" if stock['change_pct'] >= 0 else "#ef4444"
+                change_sign = "+" if stock['change_pct'] >= 0 else ""
+                
+                st.markdown(f'''
+                <div style="
+                    background: {bg_color};
+                    border-left: 3px solid {border_color};
+                    border-radius: 8px;
+                    padding: 1rem;
+                    margin-bottom: 0.5rem;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    flex-wrap: wrap;
+                    gap: 1rem;
+                ">
+                    <div style="min-width: 120px;">
+                        <div style="font-size: 1.1rem; font-weight: 700; color: white;">{stock['symbol']}</div>
+                        <div style="font-size: 0.7rem; color: rgba(255,255,255,0.5);">{stock['name'][:20]}...</div>
+                    </div>
+                    <div style="text-align: center; min-width: 80px;">
+                        <div style="font-size: 0.6rem; color: rgba(255,255,255,0.4);">FİYAT</div>
+                        <div style="font-size: 0.95rem; color: white;">{stock['price']:.2f} ₺</div>
+                    </div>
+                    <div style="text-align: center; min-width: 60px;">
+                        <div style="font-size: 0.6rem; color: rgba(255,255,255,0.4);">DEĞİŞİM</div>
+                        <div style="font-size: 0.95rem; color: {change_color};">{change_sign}{stock['change_pct']:.2f}%</div>
+                    </div>
+                    <div style="text-align: center; min-width: 60px;">
+                        <div style="font-size: 0.6rem; color: rgba(255,255,255,0.4);">RSI</div>
+                        <div style="font-size: 0.95rem; color: white;">{stock['rsi']:.0f}</div>
+                    </div>
+                    <div style="text-align: center; min-width: 60px;">
+                        <div style="font-size: 0.6rem; color: rgba(255,255,255,0.4);">ADX</div>
+                        <div style="font-size: 0.95rem; color: white;">{stock['adx']:.0f}</div>
+                    </div>
+                    <div style="text-align: center; min-width: 80px;">
+                        <div style="font-size: 0.6rem; color: rgba(255,255,255,0.4);">SKOR</div>
+                        <div style="font-size: 1.2rem; font-weight: 700; color: {stock['signal_color']};">{stock['score']}</div>
+                    </div>
+                    <div style="
+                        background: {stock['signal_color']};
+                        color: black;
+                        padding: 0.4rem 0.8rem;
+                        border-radius: 4px;
+                        font-weight: 700;
+                        font-size: 0.75rem;
+                        min-width: 80px;
+                        text-align: center;
+                    ">{stock['signal']}</div>
+                </div>
+                ''', unsafe_allow_html=True)
+        else:
+            st.warning("Hiçbir hisse taranamadı. Lütfen internet bağlantınızı kontrol edin.")
 
 # Footer
 st.markdown('''
