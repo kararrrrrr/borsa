@@ -908,13 +908,16 @@ def calculate_decision_score(data, weekly_data=None):
 
     # 3. TIER: HACİM (GÜNCELLENDİ)
     vol_score = 0
-    # Eğer hacim ortalamanın altındaysa CEZA ver (Fake yükselişleri eler)
+    # Eğer hacim ortalamanın altındaysa SADECE -5 CEZA ver (Eski: -20)
     if vol_ratio < 0.8:
-        vol_score -= 20
-        reasons.append("Hacim Çok Düşük (Güvensiz)")
-    elif vol_ratio > 1.5:
-        vol_score += 15
-        reasons.append("Hacim Destekli Yükseliş")
+        vol_score -= 5
+        reasons.append("Hacim Biraz Düşük")
+    else:
+        # Sadece hacim varsa (yeterliyse) +10 BONUS
+        vol_score += 10
+        if vol_ratio > 1.5:
+             vol_score += 5 # Ekstra teşvik
+             reasons.append("Hacim Güçlü")
         
     if cmf > 0.05:
         vol_score += 10
@@ -951,10 +954,8 @@ def calculate_decision_score(data, weekly_data=None):
         reasons.append("Haftalık Trend AYI (Dikkat)")
         
     # ─── EXTRA FİLTRELER ───
-    # ADX < 20 ise Trend Yoktur (Yatay Piyasa) -> Puanı kır
-    if adx < 20:
-        normalized_score = min(normalized_score, 55) # AL vermesini engelle
-        reasons.append("ADX Zayıf (Yatay Piyasa)")
+    # ADX Kilidi KALDIRILDI: Yatay piyasada da osilatörlere izin ver
+    # if adx < 20: ... bloğu silindi.
 
     return int(normalized_score), reasons
 
