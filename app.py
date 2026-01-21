@@ -808,11 +808,11 @@ def calculate_decision_score(data, weekly_data=None):
     score = 0
     reasons = []
     
-    # KATSAYILAR
-    W_TREND = 2.0
-    W_MOMENTUM = 1.5
-    W_VOLUME = 1.2
-    W_PATTERN = 1.8
+    # KATSAYILAR (SİNYAL KALİTESİ İÇİN DENGELENDİ)
+    W_TREND = 1.0     # Trend tek başına yeterli değil (Eski: 2.0)
+    W_MOMENTUM = 2.0  # Aşırı alım/satım daha önemli (Eski: 1.5)
+    W_VOLUME = 1.5    # Hacim teyidi şart (Eski: 1.2)
+    W_PATTERN = 1.5   # Formasyon (Eski: 1.8)
 
     # Güvenli veri erişimi için yardımcılar
     def get_val(key, default=0):
@@ -830,6 +830,13 @@ def calculate_decision_score(data, weekly_data=None):
     cmf = get_val('cmf')
     vol_ratio = get_val('volume_ratio')
     bb_width = get_val('bb_width', 10)
+    bb_upper = get_val('bb_upper')
+    
+    # ─── EXTRA HESAPLAMALAR ───
+    # Fiyatın EMA50'den uzaklığı (Extension)
+    dist_to_ema50 = 0
+    if ema50 > 0:
+        dist_to_ema50 = ((price - ema50) / ema50) * 100
     
     # 1. TIER: TREND ANALİZİ (Ichimoku & EMA)
     trend_score = 0
@@ -864,6 +871,11 @@ def calculate_decision_score(data, weekly_data=None):
     elif weekly_data: # Veri var ama Boğa değilse
         trend_score -= 10
 
+    # AŞIRI UZAMA CEZASI (Extension Penalty)
+    if dist_to_ema50 > 15:
+        trend_score -= 20
+        reasons.append("EMA50'den Aşırı Uzak (Riskli)")
+
     # 2. TIER: MOMENTUM
     mom_score = 0
     
@@ -876,21 +888,25 @@ def calculate_decision_score(data, weekly_data=None):
     # Divergence
     div = data.get('divergence', 'YOK')
     if div == "NEGATİF":
-        mom_score -= 25
+        mom_score -= 30 # Ceza artırıldı
         reasons.append("Negatif Uyumsuzluk")
     elif div == "POZİTİF":
         mom_score += 25
         reasons.append("Pozitif Uyumsuzluk")
         
     # Pullback Fırsatı (Trend yukarı, RSI soğumuş)
-    if price > sma50 and rsi < 40:
+    if price > sma50 and rsi < 45: # Tolerans artırıldı (40->45)
         mom_score += 25
         reasons.append("Trend İçi Ucuzluk (Pullback)")
     
-    # Aşırı Alım
-    if price > get_val('bb_upper') and rsi > 75:
-        mom_score -= 20
-        reasons.append("Aşırı Alım + BB Dışı")
+    # Aşırı Alım (KILL SWITCH)
+    if rsi > 70:
+        mom_score -= 15
+        if price > bb_upper:
+            mom_score -= 20
+            reasons.append("Aşırı Alım + BB Dışı")
+        else:
+            reasons.append("RSI Şişkin (>70)")
 
     # 3. TIER: HACİM
     vol_score = 0
@@ -918,6 +934,15 @@ def calculate_decision_score(data, weekly_data=None):
                 (vol_score * W_VOLUME) + (pat_score * W_PATTERN)
                 
     normalized_score = base_score + max(-50, min(50, final_raw))
+    
+    # ─── HARD CAP RULES (Aşırı Alım Freni) ───
+    if rsi > 80:
+        normalized_score = min(normalized_score, 55) # Asla 'AL' sinyali verme
+        reasons.append("RSI > 80 (Fren)")
+    elif rsi > 75:
+        normalized_score = min(normalized_score, 70) # Asla 'GÜÇLÜ AL' verme
+        reasons.append("RSI > 75 (Fren)")
+        
     return int(normalized_score), reasons
 
 def calculate_smart_score(data, weekly_data=None, atr_mult=None, tp_ratio=None):
@@ -1559,8 +1584,7 @@ with tab_scanner:
                 {'selector': 'td', 'props': [('padding', '0.5rem')]},
             ])
             
-            st.dataframe(styled_df, use_container_width=True, height=500)
-            
+            st.dataframe(styled_df, use_container_width=True, height=500)            
             # En iyi 5 hisse
             if len(results) >= 5:
                 st.markdown("---")
