@@ -741,8 +741,8 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
                     partial_exit_done = False
                     continue
 
-                # 6. ERKEN UYARI: RSI MOMENTUM KAYBI (Önceki bar RSI > 70, şimdiki < 70)
-                if i > 0 and v_rsi[i-1] > 70 and v_rsi[i] < 70:
+                # 6. ERKEN UYARI: RSI MOMENTUM KAYBI (Önceki bar RSI > 75, şimdiki < 75)
+                if i > 0 and v_rsi[i-1] > 75 and v_rsi[i] < 75:
                     exit_price = current_close
                     cash += position * exit_price * (1 - commission)
                     is_profit = exit_price > entry_price
@@ -752,7 +752,7 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
                         'date': df.index[i],
                         'price': exit_price,
                         'profit': is_profit,
-                        'reason': 'RSI Momentum Kaybı'
+                        'reason': 'RSI Momentum Kaybı (<75)'
                     })
                     position = 0
                     in_position = False
@@ -973,10 +973,10 @@ def calculate_decision_score(data, weekly_data=None):
         trend_score -= 10
 
     # AŞIRI UZAMA CEZASI (Extension Penalty - Agresifleştirildi)
-    if dist_to_ema50 > 20:  # %8 -> %20'e gevşetildi (daha agresif giriş)
+    if dist_to_ema50 > 30:  # %20 -> %30'a gevşetildi (daha agresif)
         trend_score -= 25  # Yüksek ceza
         reasons.append("EMA50'den Aşırı Uzak (Riskli)")
-    elif dist_to_ema50 > 15:  # %5 -> %15'e gevşetildi
+    elif dist_to_ema50 > 20:  # %15 -> %20'ye gevşetildi
         trend_score -= 10
         reasons.append("EMA50'den Uzaklaşıyor")
 
@@ -1003,14 +1003,15 @@ def calculate_decision_score(data, weekly_data=None):
         mom_score += 25
         reasons.append("Trend İçi Ucuzluk (Pullback)")
     
-    # Aşırı Alım (KILL SWITCH - Agresifleştirildi: RSI > 85 olmalı)
-    if rsi > 85:
-        mom_score -= 25  # Sadece RSI > 85'te ceza (70 -> 85)
+    # Aşırı Alım (KILL SWITCH - Agresifleştirildi: RSI > 90 olmalı)
+    if rsi > 90:
+        mom_score -= 25 
         if price > bb_upper:
             mom_score -= 25
             reasons.append("Aşırı Alım + BB Dışı (Tehlike!)")
         else:
-            reasons.append("RSI > 85 (Aşırı Alım)")
+            reasons.append("RSI > 90 (Aşırı Alım)")
+    # RSI 70-85 aralığı artık ceza almıyor (Ralli bölgesi)
 
     # 3. TIER: HACİM
     vol_score = 0
@@ -1040,12 +1041,13 @@ def calculate_decision_score(data, weekly_data=None):
     normalized_score = base_score + max(-50, min(50, final_raw))
     
     # ─── HARD CAP RULES (Aşırı Alım Freni - Agresifleştirildi) ───
-    if rsi > 90:
-        normalized_score = min(normalized_score, 50)  # BEKLE sinyali ver (80 -> 90)
-        reasons.append("RSI > 90 (Tehlikeli Bölge)")
-    elif rsi > 85:
-        normalized_score = min(normalized_score, 60)  # AL eşiğinde kal (75 -> 85)
-        reasons.append("RSI > 85 (Aşırı Alım)")
+    if rsi > 95:
+        normalized_score = min(normalized_score, 50)  # BEKLE sinyali ver
+        reasons.append("RSI > 95 (Tehlikeli Bölge)")
+    elif rsi > 90:
+        normalized_score = min(normalized_score, 60)  # AL eşiğinde kal
+        reasons.append("RSI > 90 (Aşırı Alım)")
+    # RSI > 70-85 arası skor freni KALDIRILDI. Rallide 80+ puan alabilir.
     # RSI > 70 ve RSI > 75 cezaları kaldırıldı (daha agresif giriş için)
     
     # ─── HAFTALIK TREND TEYİDİ (Bonus olarak değiştirildi, blok değil) ───
