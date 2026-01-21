@@ -599,7 +599,12 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
         plus_di = 100 * (plus_dm.rolling(window=14).sum() / tr14)
         minus_di = 100 * (np.abs(minus_dm).rolling(window=14).sum() / tr14)
         dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
         df['ADX'] = dx.rolling(window=14).mean()
+        
+        # Upper Wick Calculation for "Wicked Candle" Detection
+        df['Upper_Wick'] = df['High'] - df[['Open', 'Close']].max(axis=1)
+        df['Body_Size'] = (df['Close'] - df['Open']).abs()
 
         df = df.dropna()
         
@@ -632,13 +637,23 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
         v_bb_lower = df['BB_Lower'].values
         v_bb_width = df['BB_Width'].values
         v_vol_ratio = df['Volume_Ratio'].values
-        v_change = df['Change_Pct'].values
+
+        v_upper_wick = df['Upper_Wick'].values
+        v_body_size = df['Body_Size'].values
 
         trailing_stop_price = 0
         entry_price = 0
+        highest_high_since_entry = 0 # Chandelier Exit için
+        cooldown_counter = 0 # Soğuma süresi sayacı
         
         for i in range(1, len(df) - 1): # i=1'den başlıyoruz (RSI kontrolü için)
             current_close = v_closes[i]
+            current_high = v_highs[i]
+            
+            # Soğuma süresini azalt
+            if cooldown_counter > 0:
+                cooldown_counter -= 1
+                continue # İşlem yapma, pas geç
             
             # ─── ÇIKIŞ MANTIĞI (GÜNCELLENDİ) ───
             if in_position:
@@ -668,7 +683,12 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
                     exit_price = current_close
                     cash += position * exit_price * (1 - commission)
                     is_profit = exit_price > entry_price
-                    if is_profit: wins += 1
+                    if is_profit: 
+                        wins += 1
+                    else:
+                        # ZARAR EDİLDİYSE COOLDOWN BAŞLAT (3 GÜN)
+                        cooldown_counter = 3
+
                     trades.append({
                         'type': 'exit',
                         'date': df.index[i],
@@ -678,11 +698,17 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
                     })
                     position = 0
                     in_position = False
+                    highest_high_since_entry = 0
                     continue
                 
-                # STOP GÜNCELLEME (Trailing)
-                # Fiyat yükseldikçe stopu yukarı çek
-                new_stop = current_close - (atr_mult * v_atr[i])
+                # STOP GÜNCELLEME (Chandelier Exit - Trailing)
+                # Fiyat yerine Görülen En Yüksek Tepeden (High) stop çalısır
+                if current_high > highest_high_since_entry:
+                    highest_high_since_entry = current_high
+                
+                # Stop seviyesi: En Yüksek Tepe - (ATR * Mult)
+                new_stop = highest_high_since_entry - (atr_mult * v_atr[i])
+                
                 if new_stop > trailing_stop_price:
                     trailing_stop_price = new_stop
 
@@ -702,7 +728,11 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
                     'bb_width': v_bb_width[i],
                     'span_a': v_span_a[i],
                     'span_b': v_span_b[i],
+                    'span_b': v_span_b[i],
                     'change_pct': v_change[i],
+                    'upper_wick': v_upper_wick[i],
+                    'body_size': v_body_size[i],
+                    'atr': v_atr[i],
                     'divergence': 'YOK'
                 }
                 
@@ -719,8 +749,10 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0):
                     trades_count += 1
                     trades.append({'type': 'entry', 'date': df.index[i+1], 'price': entry_price})
                     
-                    # İlk Stop Belirleme
-                    trailing_stop_price = entry_price - (atr_mult * v_atr[i])
+                    # İlk Stop Belirleme (Chandelier Mantığı - Giriş anında High=Entry kabul edelim veya o günün High'ı)
+                    # Konservatif olması için Entry Price baz alıyoruz
+                    highest_high_since_entry = entry_price
+                    trailing_stop_price = highest_high_since_entry - (atr_mult * v_atr[i])
                 
         final_value = cash + (position * v_closes[-1] if in_position else 0)
         total_return = ((final_value - initial_capital) / initial_capital) * 100
@@ -802,11 +834,24 @@ def calculate_decision_score(data, weekly_data=None):
     score = 0
     reasons = []
     
-    # KATSAYILAR (SİNYAL KALİTESİ İÇİN DENGELENDİ)
-    W_TREND = 1.0     # Trend tek başına yeterli değil (Eski: 2.0)
-    W_MOMENTUM = 2.0  # Aşırı alım/satım daha önemli (Eski: 1.5)
-    W_VOLUME = 1.5    # Hacim teyidi şart (Eski: 1.2)
-    W_PATTERN = 1.5   # Formasyon (Eski: 1.8)
+    # KATSAYILAR (ADAPTİF / BUKALEMUN MANTIĞI)
+    # Varsayılan (Nötr)
+    W_TREND = 1.0     
+    W_MOMENTUM = 2.0  
+    W_VOLUME = 1.5    
+    W_PATTERN = 1.5   
+    
+    adx = data.get('adx', 0)
+    
+    # REJİM TESPİTİ
+    if adx < 20: 
+        # Range/Yatay Piyasa -> Osilatörlere öncelik ver
+        W_MOMENTUM = 2.5
+        W_TREND = 0.5
+    elif adx > 25:
+        # Trend Piyasası -> Trend takipçilere öncelik ver
+        W_TREND = 2.0
+        W_MOMENTUM = 1.5
 
     # Güvenli veri erişimi için yardımcılar
     def get_val(key, default=0):
@@ -824,7 +869,12 @@ def calculate_decision_score(data, weekly_data=None):
     cmf = get_val('cmf')
     vol_ratio = get_val('volume_ratio')
     bb_width = get_val('bb_width', 10)
+    bb_width = get_val('bb_width', 10)
     bb_upper = get_val('bb_upper')
+    trend_dir = data.get('trend_direction', 'NÖTR') # Trend direction verisini al
+    upper_wick = data.get('upper_wick', 0)
+    body_size = data.get('body_size', 0)
+    atr = data.get('atr', 0)
     
     # ─── EXTRA HESAPLAMALAR ───
     # Fiyatın EMA50'den uzaklığı (Extension)
@@ -904,7 +954,14 @@ def calculate_decision_score(data, weekly_data=None):
             reasons.append("Aşırı Alım + BB Dışı (Tehlike!)")
         else:
             reasons.append("RSI > 90 (Aşırı Alım)")
-    # RSI 70-85 aralığı artık ceza almıyor (Ralli bölgesi)
+    # RSI > 70-85 aralığı artık ceza almıyor (Ralli bölgesi)
+    
+    # FİTİLLİ MUM CEZASI (Wicked Candle Penalty - Volatilite yerine)
+    # Eğer üst fitil gövdenin 2 katından büyükse VE fitil ATR'nin yarısından büyükse (anlamlıysa)
+    if body_size > 0 and upper_wick > (2 * body_size) and upper_wick > (atr * 0.5):
+        # Bu bir "Shooting Star" veya satış baskısıdır
+        trend_score -= 15
+        reasons.append("Satış Baskısı (Uzun Üst Fitil)")
 
     # 3. TIER: HACİM (GÜNCELLENDİ)
     vol_score = 0
@@ -941,9 +998,19 @@ def calculate_decision_score(data, weekly_data=None):
     if rsi > 95:
         normalized_score = min(normalized_score, 50)  # BEKLE sinyali ver
         reasons.append("RSI > 95 (Tehlikeli Bölge)")
+        reasons.append("RSI > 95 (Tehlikeli Bölge)")
     elif rsi > 90:
-        normalized_score = min(normalized_score, 60)  # AL eşiğinde kal
-        reasons.append("RSI > 90 (Aşırı Alım)")
+        # KURAL: Eğer ADX > 30 ve Trend YUKARI ise, RSI 90 olabilir (Ralli Modu)
+        if adx > 30 and trend_dir == "YUKARI":
+             pass # Ceza verme, bırak koşsun
+        else:
+            normalized_score = min(normalized_score, 60)
+            reasons.append("RSI > 90 (Aşırı Alım)")
+    elif rsi > 85:
+        # Normal şartlarda 85 üstü risklidir
+        if not (adx > 30 and trend_dir == "YUKARI"):
+             normalized_score = min(normalized_score, 70)
+             reasons.append("RSI > 85 (Dikkat)")
     # RSI > 70-85 arası skor freni KALDIRILDI. Rallide 80+ puan alabilir.
     # RSI > 70 ve RSI > 75 cezaları kaldırıldı (daha agresif giriş için)
     
@@ -987,6 +1054,11 @@ def calculate_smart_score(data, weekly_data=None, atr_mult=None, tp_ratio=None):
         atr_mult = 2.5 if data['adx'] > 30 else 2.0
         
     stop_loss = price - (atr_mult * atr)
+    
+    # CHANDELIER EXIT (Eğer veri varsa High üzerinden hesapla - Daha güvenli)
+    # (Ancak canlı veride 'High' o anki fiyattan büyük veya eşittir,
+    # gün içi en yüksek fiyatı bilmediğimiz için 'price' bazlı trailing mantıklıdır.
+    # Backtest'te "Highest High" kullandık ama canlıda anlık High=Price kabul edilir.)
     
     # Take Profit hesaplama
     if tp_ratio is None:
