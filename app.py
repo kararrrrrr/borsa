@@ -508,6 +508,7 @@ def run_robust_backtest(symbol, rsi_period=14, ema_period=200, rsi_threshold=40)
         in_position = False
         trades_count = 0
         wins = 0
+        entry_price_tracked = 0  # Track entry price for win/loss calculation
         
         # Hızlı İterasyon
         for i in range(len(df) - 1):
@@ -519,19 +520,24 @@ def run_robust_backtest(symbol, rsi_period=14, ema_period=200, rsi_threshold=40)
             if in_position:
                 if df['RSI'].iloc[i] > 70 or df['Close'].iloc[i] < df['EMA_Trend'].iloc[i]:
                     exit_price = opens[i+1] * (1 - slippage)
-                    cash += position * exit_price * (1 - commission)
-                    if (position * exit_price * (1 - commission)) > (position * (initial_capital / position) if position > 0 else 0): # Basit win check hatali olabilir ama pnl yeterli
-                        # Win check'i entry price ile yapmak lazim, burada basitlestirildi
-                        pass
+                    exit_value = position * exit_price * (1 - commission)
+                    cash += exit_value
+                    
+                    # Win/Loss calculation
+                    entry_value = position * entry_price_tracked * (1 + commission)
+                    if exit_value > entry_value:
+                        wins += 1
                     
                     position = 0
                     in_position = False
                     trades_count += 1
+                    entry_price_tracked = 0
                     continue
             
             # GİRİŞ
             if not in_position and signals[i]:
                 entry_price = opens[i+1] * (1 + slippage)
+                entry_price_tracked = entry_price  # Store entry price
                 size = cash / entry_price
                 cost = size * entry_price * (1 + commission)
                 cash -= cost
@@ -557,11 +563,15 @@ def run_robust_backtest(symbol, rsi_period=14, ema_period=200, rsi_threshold=40)
         drawdown = (equity_series - rolling_max) / rolling_max
         max_drawdown = drawdown.min() * 100
         
+        # Win Rate Calculation
+        win_rate = (wins / trades_count * 100) if trades_count > 0 else 0
+        
         return {
             "total_pnl": total_return,
             "sharpe_ratio": sharpe_ratio,
             "max_drawdown": max_drawdown,
             "total_trades": trades_count,
+            "win_rate": win_rate,
             "final_equity": final_value
         }
     except Exception as e:
