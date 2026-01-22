@@ -689,16 +689,452 @@ def analyze_indicator_dna(symbol, lookback_days=60):
         return {"trend_weight": 1.0, "momentum_weight": 1.0, "volume_weight": 1.0}
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3.6 BACKTEST MOTORU
+# 3.6 WYCKOFF & PRICE ACTION ANALİZ MOTORU
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def detect_swing_points(df, lookback=5):
+    """
+    Swing High/Low (Tepe/Dip) noktalarını tespit eder.
+    HH (Higher High), HL (Higher Low), LH (Lower High), LL (Lower Low)
+    
+    Args:
+        df: OHLCV DataFrame
+        lookback: Kaç mum geriye bakılacağı
+        
+    Returns:
+        dict: swing_highs, swing_lows, current_structure
+    """
+    highs = df['High'].values
+    lows = df['Low'].values
+    closes = df['Close'].values
+    
+    swing_highs = []
+    swing_lows = []
+    
+    for i in range(lookback, len(df) - lookback):
+        # Swing High: Ortadaki mum, sağ ve soldaki N mumdan yüksek
+        is_swing_high = all(highs[i] >= highs[i-j] for j in range(1, lookback+1)) and \
+                        all(highs[i] >= highs[i+j] for j in range(1, lookback+1))
+        
+        # Swing Low: Ortadaki mum, sağ ve soldaki N mumdan düşük
+        is_swing_low = all(lows[i] <= lows[i-j] for j in range(1, lookback+1)) and \
+                       all(lows[i] <= lows[i+j] for j in range(1, lookback+1))
+        
+        if is_swing_high:
+            swing_highs.append({'index': i, 'price': highs[i], 'date': df.index[i]})
+        if is_swing_low:
+            swing_lows.append({'index': i, 'price': lows[i], 'date': df.index[i]})
+    
+    # Son 2 swing point'i karşılaştırarak yapıyı belirle
+    structure = "UNDEFINED"
+    
+    if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+        last_high = swing_highs[-1]['price']
+        prev_high = swing_highs[-2]['price']
+        last_low = swing_lows[-1]['price']
+        prev_low = swing_lows[-2]['price']
+        
+        if last_high > prev_high and last_low > prev_low:
+            structure = "UPTREND"  # HH + HL
+        elif last_high < prev_high and last_low < prev_low:
+            structure = "DOWNTREND"  # LH + LL
+        else:
+            structure = "CONSOLIDATION"  # Karışık
+    
+    return {
+        'swing_highs': swing_highs,
+        'swing_lows': swing_lows,
+        'structure': structure,
+        'last_hl': swing_lows[-1]['price'] if swing_lows else None,
+        'last_lh': swing_highs[-1]['price'] if swing_highs else None
+    }
+
+
+def detect_choch(df, swing_data):
+    """
+    Change of Character (Karakter Değişimi) tespit eder.
+    
+    Yükseliş trendinde: Fiyat son HL'nin altına inerse → BEARISH CHoCH
+    Düşüş trendinde: Fiyat son LH'nin üstüne çıkarsa → BULLISH CHoCH
+    
+    Returns:
+        dict: choch_type, is_choch, message
+    """
+    if not swing_data or not swing_data['swing_lows'] or not swing_data['swing_highs']:
+        return {'is_choch': False, 'choch_type': None, 'message': 'Yetersiz veri'}
+    
+    current_price = df['Close'].iloc[-1]
+    structure = swing_data['structure']
+    last_hl = swing_data['last_hl']
+    last_lh = swing_data['last_lh']
+    
+    # Yükseliş trendinde düşüş CHoCH
+    if structure == "UPTREND" and last_hl:
+        if current_price < last_hl:
+            return {
+                'is_choch': True,
+                'choch_type': 'BEARISH',
+                'message': f'⚠️ CHoCH: Fiyat son HL ({last_hl:.2f}) altına indi. TREND BİTTİ!',
+                'level': last_hl
+            }
+    
+    # Düşüş trendinde yükseliş CHoCH
+    if structure == "DOWNTREND" and last_lh:
+        if current_price > last_lh:
+            return {
+                'is_choch': True,
+                'choch_type': 'BULLISH',
+                'message': f'✅ CHoCH: Fiyat son LH ({last_lh:.2f}) üstüne çıktı. TREND DÖNDÜ!',
+                'level': last_lh
+            }
+    
+    return {'is_choch': False, 'choch_type': None, 'message': 'CHoCH yok'}
+
+
+def analyze_candle_wick(row):
+    """
+    Mum iğne analizi - Rejection sinyalleri için.
+    
+    - Üst iğne > 2x gövde → Satıcı reddi (BEARISH)
+    - Alt iğne > 2x gövde → Alıcı reddi (BULLISH)
+    
+    Returns:
+        dict: body, upper_wick, lower_wick, rejection_up, rejection_down, wick_ratio
+    """
+    open_price = row['Open']
+    close_price = row['Close']
+    high_price = row['High']
+    low_price = row['Low']
+    
+    body = abs(close_price - open_price)
+    upper_wick = high_price - max(open_price, close_price)
+    lower_wick = min(open_price, close_price) - low_price
+    
+    # Minimum gövde eşiği (çok küçük gövdelerde oran yanıltıcı olabilir)
+    min_body = body if body > 0.001 else 0.001
+    
+    return {
+        'body': body,
+        'upper_wick': upper_wick,
+        'lower_wick': lower_wick,
+        'upper_wick_ratio': upper_wick / min_body,
+        'lower_wick_ratio': lower_wick / min_body,
+        'rejection_up': lower_wick > (2 * body),  # Yukarı rejection (BULLISH)
+        'rejection_down': upper_wick > (2 * body),  # Aşağı rejection (BEARISH)
+        'is_doji': body < (high_price - low_price) * 0.1  # Gövde < %10 range = Doji
+    }
+
+
+def detect_buying_climax(row, vol_ratio, price_change_pct):
+    """
+    Buying Climax (Alım Çılgınlığı) tespit eder.
+    Dağıtım işareti = ÇIKIŞ SİNYALİ
+    
+    Koşullar:
+    - Hacim normalin 1.5x+ üstünde
+    - Fiyat yükseliyor (pozitif değişim)
+    - Uzun üst iğne (satıcı reddi)
+    
+    Bu, akıllı paranın elindeki malı küçük yatırımcıya devrettiği noktadır.
+    """
+    wick_data = analyze_candle_wick(row)
+    
+    is_climax = (
+        vol_ratio > 1.5 and
+        price_change_pct > 0 and
+        wick_data['rejection_down']  # Üstten red = satıcılar bastırdı
+    )
+    
+    strength = 0
+    if is_climax:
+        # Hacim ne kadar yüksekse sinyal o kadar güçlü
+        strength = min(100, int(vol_ratio * 30 + wick_data['upper_wick_ratio'] * 10))
+    
+    return {
+        'is_climax': is_climax,
+        'strength': strength,
+        'vol_ratio': vol_ratio,
+        'wick_ratio': wick_data['upper_wick_ratio'],
+        'message': '🔴 BUYING CLIMAX: Akıllı para dağıtıyor!' if is_climax else None
+    }
+
+
+def detect_stopping_volume(row, vol_ratio, price_change_pct, prev_closes):
+    """
+    Stopping Volume (Durduran Hacim) tespit eder.
+    Birikim işareti = GİRİŞ SİNYALİ
+    
+    Koşullar:
+    - Devasa hacim (2x+ ortalama)
+    - Fiyat düşüşten sonra artık düşmüyor
+    - Uzun alt iğne veya Doji (alıcı iradesi)
+    
+    Bu, büyük oyuncuların sessizce mal topladığı noktadır.
+    """
+    wick_data = analyze_candle_wick(row)
+    
+    # Son 5 günde düşüş var mı?
+    was_falling = False
+    if len(prev_closes) >= 5:
+        was_falling = prev_closes[-1] < prev_closes[-5]  # 5 gün önceye göre düşmüş
+    
+    is_stopping = (
+        vol_ratio > 2.0 and
+        was_falling and
+        (wick_data['rejection_up'] or wick_data['is_doji']) and
+        abs(price_change_pct) < 1.0  # Fiyat fazla değişmedi (emilim)
+    )
+    
+    strength = 0
+    if is_stopping:
+        strength = min(100, int(vol_ratio * 25 + wick_data['lower_wick_ratio'] * 15))
+    
+    return {
+        'is_stopping': is_stopping,
+        'strength': strength,
+        'vol_ratio': vol_ratio,
+        'wick_ratio': wick_data['lower_wick_ratio'],
+        'message': '🟢 STOPPING VOLUME: Büyük oyuncular topluyor!' if is_stopping else None
+    }
+
+
+def analyze_effort_vs_result(vol_ratio, price_change_pct):
+    """
+    Çaba vs. Sonuç Analizi (Effort vs Result)
+    
+    Hacim yükseldi ama fiyat değişmedi = BİRİLERİ SESSIZCE POZİSYON DEĞİŞTİRİYOR
+    
+    - Hacim %50+ arttı (vol_ratio > 1.5)
+    - Fiyat sadece %0.5'ten az değişti
+    
+    Bu uyumsuzluk, yaklaşan büyük bir hareketin habercisidir.
+    """
+    is_divergence = vol_ratio > 1.5 and abs(price_change_pct) < 0.5
+    
+    direction = None
+    if is_divergence:
+        # Yön tahmini: Fiyat yükseliyorsa dağıtım, düşüyorsa birikim olabilir
+        if price_change_pct > 0:
+            direction = "DISTRIBUTION"  # Yukarı gidiyor ama hacim emiliyor = Dağıtım
+        else:
+            direction = "ACCUMULATION"  # Aşağı gidiyor ama hacim emiliyor = Birikim
+    
+    return {
+        'is_divergence': is_divergence,
+        'direction': direction,
+        'vol_ratio': vol_ratio,
+        'price_change': price_change_pct,
+        'message': f'⚡ ÇABA/SONUÇ: Hacim {vol_ratio:.1f}x ama fiyat sadece %{price_change_pct:.2f}' if is_divergence else None
+    }
+
+
+def detect_liquidity_sweep(df, lookback=3):
+    """
+    Liquidity Sweep (Likidite Avı) / Spring tespit eder.
+    
+    Spring (BULLISH):
+    - Fiyat son N günün en düşüğünün altına sarkıp hemen geri döndü
+    - Stop-loss avı yapılmış, yakıt toplandı
+    - ÇOK GÜÇLÜ ALIŞ SİNYALİ
+    
+    Upthrust (BEARISH):
+    - Fiyat son N günün en yükseğinin üstüne çıkıp geri döndü
+    - Stop-loss avı yapılmış
+    - SATIŞ SİNYALİ
+    """
+    if len(df) < lookback + 2:
+        return {'is_sweep': False, 'sweep_type': None}
+    
+    current = df.iloc[-1]
+    current_close = current['Close']
+    current_low = current['Low']
+    current_high = current['High']
+    
+    # Son N günün aralığı (bugün hariç)
+    recent = df.iloc[-(lookback+1):-1]
+    recent_low = recent['Low'].min()
+    recent_high = recent['High'].max()
+    
+    # SPRING: Düşük kırıldı ama kapanış içeride
+    is_spring = current_low < recent_low and current_close > recent_low
+    
+    # UPTHRUST: Yüksek kırıldı ama kapanış içeride
+    is_upthrust = current_high > recent_high and current_close < recent_high
+    
+    if is_spring:
+        sweep_depth = ((recent_low - current_low) / recent_low) * 100
+        return {
+            'is_sweep': True,
+            'sweep_type': 'SPRING',
+            'level': recent_low,
+            'depth': sweep_depth,
+            'message': f'🎯 SPRING: Likidite avı! Fiyat {recent_low:.2f} altına sarkıp döndü. GÜÇLÜ ALIŞ!'
+        }
+    
+    if is_upthrust:
+        sweep_depth = ((current_high - recent_high) / recent_high) * 100
+        return {
+            'is_sweep': True,
+            'sweep_type': 'UPTHRUST',
+            'level': recent_high,
+            'depth': sweep_depth,
+            'message': f'🎯 UPTHRUST: Likidite avı! Fiyat {recent_high:.2f} üstüne çıkıp döndü. SATIŞ!'
+        }
+    
+    return {'is_sweep': False, 'sweep_type': None, 'message': None}
+
+
+def check_structure_break(df, lookback=3):
+    """
+    Yapı Kontrolü - "Son N günün en düşüğünün altına sarktık mı?"
+    
+    Bu basit ama etkili filtre, trend kırılımlarını erken tespit eder.
+    """
+    if len(df) < lookback + 1:
+        return {'is_broken': False, 'level': None}
+    
+    current_low = df['Low'].iloc[-1]
+    recent_lows = df['Low'].iloc[-(lookback+1):-1]
+    structure_level = recent_lows.min()
+    
+    is_broken = current_low < structure_level
+    
+    return {
+        'is_broken': is_broken,
+        'level': structure_level,
+        'current_low': current_low,
+        'message': f'⚠️ YAPI KIRILDI: Fiyat {structure_level:.2f} desteğinin altına indi!' if is_broken else None
+    }
+
+
+def calculate_wyckoff_score(data, df):
+    """
+    WYCKOFF & PRICE ACTION SKORLAMA SİSTEMİ
+    
+    Geleneksel indikatörler yerine 3 temel mantık kapısına dayanır:
+    
+    1. YAPI KONTROLÜ (Structure Check)
+    2. ÇABA vs. SONUÇ (Effort vs Result) + VSA
+    3. İĞNE ANALİZİ (Wick Analysis)
+    
+    BONUS: Spring, CHoCH, Buying Climax, Stopping Volume
+    """
+    base_score = 50
+    score = 0
+    reasons = []
+    
+    # Gerekli verileri al
+    current_row = df.iloc[-1]
+    vol_ratio = data.get('volume_ratio', 1.0)
+    price_change = data.get('change_pct', 0)
+    prev_closes = df['Close'].values[-10:] if len(df) >= 10 else df['Close'].values
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # 1. MANTIК KAPISI: YAPI KONTROLÜ
+    # ═══════════════════════════════════════════════════════════════════
+    structure_check = check_structure_break(df, lookback=3)
+    if structure_check['is_broken']:
+        score -= 30
+        reasons.append("⚠️ Yapı Kırıldı (Risk)")
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # 2. MANTIК KAPISI: ÇABA vs. SONUÇ
+    # ═══════════════════════════════════════════════════════════════════
+    effort_result = analyze_effort_vs_result(vol_ratio, price_change)
+    if effort_result['is_divergence']:
+        if effort_result['direction'] == "ACCUMULATION":
+            score += 15
+            reasons.append("⚡ Gizli Birikim")
+        elif effort_result['direction'] == "DISTRIBUTION":
+            score -= 20
+            reasons.append("⚡ Gizli Dağıtım")
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # 3. MANTIК KAPISI: İĞNE ANALİZİ
+    # ═══════════════════════════════════════════════════════════════════
+    wick_data = analyze_candle_wick(current_row)
+    
+    if wick_data['rejection_up']:  # Alt iğne = Alıcı tepkisi
+        score += 25
+        reasons.append("📍 Güçlü Alt İğne (Alıcı Reddi)")
+    
+    if wick_data['rejection_down']:  # Üst iğne = Satıcı tepkisi
+        score -= 25
+        reasons.append("📍 Güçlü Üst İğne (Satıcı Reddi)")
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # BONUS SİNYALLER
+    # ═══════════════════════════════════════════════════════════════════
+    
+    # Spring (Likidite Avı - GÜÇLÜ AL)
+    liquidity_sweep = detect_liquidity_sweep(df, lookback=3)
+    if liquidity_sweep['is_sweep']:
+        if liquidity_sweep['sweep_type'] == 'SPRING':
+            score += 40
+            reasons.append("🎯 Spring: Likidite Avı Tamamlandı!")
+        elif liquidity_sweep['sweep_type'] == 'UPTHRUST':
+            score -= 40
+            reasons.append("🎯 Upthrust: Satış Baskısı!")
+    
+    # Buying Climax (ÇIKIŞ SİNYALİ)
+    buying_climax = detect_buying_climax(current_row, vol_ratio, price_change)
+    if buying_climax['is_climax']:
+        score -= 40
+        reasons.append("🔴 Alım Çılgınlığı (Dağıtım)")
+    
+    # Stopping Volume (GİRİŞ SİNYALİ)
+    stopping_vol = detect_stopping_volume(current_row, vol_ratio, price_change, prev_closes)
+    if stopping_vol['is_stopping']:
+        score += 35
+        reasons.append("🟢 Durduran Hacim (Birikim)")
+    
+    # CHoCH (Change of Character)
+    swing_data = detect_swing_points(df, lookback=5)
+    choch = detect_choch(df, swing_data)
+    
+    if choch['is_choch']:
+        if choch['choch_type'] == 'BEARISH':
+            score -= 50
+            reasons.append("❌ CHoCH: Trend Sona Erdi!")
+        elif choch['choch_type'] == 'BULLISH':
+            score += 35
+            reasons.append("✅ CHoCH: Trend Dönüşü!")
+    
+    # Market Structure Bonus
+    if swing_data['structure'] == 'UPTREND':
+        score += 10
+        reasons.append("📈 Yapı: Yükseliş Trendi")
+    elif swing_data['structure'] == 'DOWNTREND':
+        score -= 15
+        reasons.append("📉 Yapı: Düşüş Trendi")
+    
+    # ═══════════════════════════════════════════════════════════════════
+    # TEMEL TREND FİLTRELERİ (Güvenlik Ağı)
+    # ═══════════════════════════════════════════════════════════════════
+    ema50 = data.get('ema50', 0)
+    ema200 = data.get('ema200', 0)
+    price = data.get('price', 0)
+    
+    # Altın Çapraz kontrolü
+    if ema50 > 0 and ema200 > 0:
+        if ema50 > ema200 and price > ema50:
+            score += 10
+        elif ema50 < ema200 and price < ema50:
+            score -= 10
+    
+    # Final skor hesaplama
+    final_score = base_score + max(-50, min(50, score))
+    
+    return int(final_score), reasons, {
+        'structure': swing_data['structure'],
+        'choch': choch,
+        'liquidity_sweep': liquidity_sweep,
+        'wick_analysis': wick_data
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3.6 PROFESYONEL BACKTEST & OPTİMİZASYON (VectorBT + Optuna)
-# ═══════════════════════════════════════════════════════════════════════════════
-# ═══════════════════════════════════════════════════════════════════════════════
-# 3.6 PROFESYONEL BACKTEST & OPTİMİZASYON (Pandas Vectorized)
-# ═══════════════════════════════════════════════════════════════════════════════
-# ═══════════════════════════════════════════════════════════════════════════════
-# 3.6 PROFESYONEL BACKTEST & OPTİMİZASYON (Robust Sharpe & Drawdown)
+# 3.7 BACKTEST MOTORU
 # ═══════════════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=600)
 def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0, rsi_limit=75):
@@ -946,7 +1382,7 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0, rsi_limit=75):
                     partial_exit_done = False
                     continue
 
-            # ─── GİRİŞ MANTIĞI (Unified Score) ───
+            # ─── GİRİŞ MANTIĞI (WYCKOFF ENTEGRE) ───
             if not in_position:
                 # Veri sözlüğünü hazırla (Scalar değerler)
                 row_data = {
@@ -967,8 +1403,15 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0, rsi_limit=75):
                     'divergence': 'YOK'
                 }
                 
-                # Ortak skorlama fonksiyonunu çağır
-                score, _ = calculate_decision_score(row_data, weekly_data=None, rsi_limit=rsi_limit)
+                # WYCKOFF SKORLAMASI (DataFrame'in son N satırını kullan)
+                lookback_window = min(i + 1, 60)  # En fazla 60 gün geriye bak
+                df_slice = df.iloc[max(0, i - lookback_window + 1):i + 1].copy()
+                
+                if len(df_slice) >= 20:
+                    score, _, _ = calculate_wyckoff_score(row_data, df_slice)
+                else:
+                    # Yeterli veri yoksa eski sistemi kullan
+                    score, _ = calculate_decision_score(row_data, weekly_data=None, rsi_limit=rsi_limit)
                 
                 # ALIM EŞİĞİ
                 if score >= 60:
@@ -1209,15 +1652,30 @@ def calculate_decision_score(data, weekly_data=None, rsi_limit=75, indicator_dna
         
     return int(normalized_score), reasons
 
-def calculate_smart_score(data, weekly_data=None, atr_mult=None, tp_ratio=None, rsi_limit=75, indicator_dna=None):
+def calculate_smart_score(data, weekly_data=None, atr_mult=None, tp_ratio=None, rsi_limit=75, indicator_dna=None, df=None):
     """
-    Akıllı skor hesaplama fonksiyonu.
+    Akıllı skor hesaplama fonksiyonu - WYCKOFF ENTEGRE.
     
     Args:
-        indicator_dna: Hissenin DNA analizi (analyze_indicator_dna'dan)
+        data: Hisse teknik verileri
+        weekly_data: Haftalık trend verileri
+        atr_mult: ATR çarpanı (stop-loss için)
+        tp_ratio: Take-profit oranı
+        rsi_limit: RSI limiti
+        indicator_dna: Hissenin DNA analizi
+        df: DataFrame (Wyckoff analizi için gerekli)
     """
-    # Karar skorunu dinamik ağırlıklarla hesapla
-    score, reasons = calculate_decision_score(data, weekly_data, rsi_limit=rsi_limit, indicator_dna=indicator_dna)
+    # Eğer DataFrame varsa Wyckoff skorlamasını kullan
+    if df is not None and len(df) >= 20:
+        score, reasons, wyckoff_data = calculate_wyckoff_score(data, df)
+        
+        # Wyckoff verisini reasons'a ekle
+        if wyckoff_data.get('structure'):
+            reasons.insert(0, f"📊 Yapı: {wyckoff_data['structure']}")
+    else:
+        # DataFrame yoksa eski sistemi kullan (geriye uyumluluk)
+        score, reasons = calculate_decision_score(data, weekly_data, rsi_limit=rsi_limit, indicator_dna=indicator_dna)
+        wyckoff_data = None
     
     # Renk ve Etiket
     if score >= 80:
@@ -1637,15 +2095,16 @@ with tab_analiz:
             # YENİ: Piyasa Rejimi Tespiti
             regime, osc_mult, trend_mult = detect_market_regime(data.get('adx', 20))
             
-            # ═══ SİNYAL SKORU (SNIPER ALGORİTMASI v4 - Unified) ═══
-            # Optimize edilmiş parametreleri ve DNA'yı sinyal hesaplamasına gönder
+            # ═══ SİNYAL SKORU (WYCKOFF ALGORİTMASI) ═══
+            # Optimize edilmiş parametreleri ve DataFrame'i sinyal hesaplamasına gönder
             score, signal, signal_color, reasons, risk_levels = calculate_smart_score(
                 data, 
                 weekly_data, 
                 atr_mult=best_params['atr_multiplier'],
                 tp_ratio=best_params['take_profit_ratio'],
                 rsi_limit=best_params['rsi_limit'],
-                indicator_dna=indicator_dna  # YENİ: Dinamik ağırlıklar
+                indicator_dna=indicator_dna,
+                df=data['df']  # WYCKOFF için DataFrame
             )
             
             # Karar Paneli
