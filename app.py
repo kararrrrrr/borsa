@@ -1,6 +1,5 @@
 import streamlit as st
-import requests
-import datetime
+import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import google.generativeai as genai
@@ -250,70 +249,6 @@ if "GEMINI_API_KEY" in st.secrets:
 else:
     st.error("⚠️ API Anahtarı eksik. Lütfen Streamlit Secrets'a GEMINI_API_KEY ekleyin.")
     st.stop()
-    
-if "FINNHUB_API_KEY" not in st.secrets:
-    st.error("⚠️ Finnhub API Anahtarı eksik. Lütfen Streamlit Secrets'a FINNHUB_API_KEY ekleyin.")
-    st.stop()
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 2.5 VERİ ÇEKME MOTORU (Finnhub)
-# ═══════════════════════════════════════════════════════════════════════════════
-@st.cache_data(ttl=3600)
-def fetch_stock_data(symbol, days=730):
-    """
-    Finnhub üzerinden OHLCV verisi çeker.
-    Varsayılan olarak 2 yıllık (730 gün) günlük veri getirir.
-    """
-    try:
-        api_key = st.secrets["FINNHUB_API_KEY"]
-        
-        # Finnhub sembol düzeltmesi (BIST için .IS uzantısı)
-        # Kullanıcı zaten .IS ile giriyor varsayıyoruz, ama Finnhub formatı: THYAO.IS
-        
-        # Zaman aralığı hesapla (Unix Timestamp)
-        end_date = int(time.time())
-        start_date = int(end_date - (days * 86400))
-        
-        url = "https://finnhub.io/api/v1/stock/candle"
-        params = {
-            'symbol': symbol,
-            'resolution': 'D',
-            'from': start_date,
-            'to': end_date,
-            'token': api_key
-        }
-        
-        response = requests.get(url, params=params)
-        data = response.json()
-        
-        if data.get('s') != 'ok':
-            # Hata durumunda veya veri yoksa
-            return None
-            
-        # DataFrame oluştur
-        df = pd.DataFrame({
-            'Open': data['o'],
-            'High': data['h'],
-            'Low': data['l'],
-            'Close': data['c'],
-            'Volume': data['v'],
-            'Time': data['t']
-        })
-        
-        # Zaman damgasını datetime'a çevir
-        df['Date'] = pd.to_datetime(df['Time'], unit='s')
-        df.set_index('Date', inplace=True)
-        df.drop('Time', axis=1, inplace=True)
-        
-        # Datetime index timezone-aware olabilir mi? Finnhub UTC döner.
-        # Yerel saate çevirmek isterseniz: df.index = df.index.tz_localize('UTC').tz_convert('Europe/Istanbul')
-        # Şimdilik naive datetime bırakıyoruz veya UTC kabul ediyoruz.
-        
-        return df
-        
-    except Exception as e:
-        st.error(f"Veri çekme hatası ({symbol}): {str(e)}")
-        return None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. GELİŞMİŞ TEKNİK ANALİZ MOTORU
@@ -322,19 +257,13 @@ def fetch_stock_data(symbol, days=730):
 def get_advanced_data(symbol):
     """Gelişmiş teknik analiz verileri"""
     try:
-        # Finnhub'dan 2 yıllık veri çek (cache'den gelir)
-        full_df = fetch_stock_data(symbol)
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="1y")  # 1 yıllık veri
         
-        if full_df is None or full_df.empty or len(full_df) < 50:
+        if hist.empty or len(hist) < 50:
             return None
         
-        # Son 1 yıllık veriyi al (yaklaşık 252 işlem günü, biz takvim yılı alalım)
-        # Veri zaten günlük, son 365 günü filtreleyelim
-        cutoff_date = full_df.index.max() - pd.Timedelta(days=365)
-        df = full_df[full_df.index >= cutoff_date].copy()
-        
-        if df.empty:
-            return None
+        df = hist.copy()
         
         # ─── RSI (14 Periyot) ───
         delta = df['Close'].diff()
@@ -695,20 +624,8 @@ def get_advanced_data(symbol):
 def get_weekly_trend(symbol):
     """Haftalık zaman diliminde trend analizi"""
     try:
-        # Finnhub'dan günlük veri çek (cache'den gelir)
-        daily_df = fetch_stock_data(symbol)
-        
-        if daily_df is None or daily_df.empty or len(daily_df) < 50:
-            return None
-            
-        # Haftalık resample yap
-        weekly = daily_df.resample('W').agg({
-            'Open': 'first',
-            'High': 'max',
-            'Low': 'min',
-            'Close': 'last',
-            'Volume': 'sum'
-        })
+        ticker = yf.Ticker(symbol)
+        weekly = ticker.history(period="2y", interval="1wk")
         
         if weekly.empty or len(weekly) < 20:
             return None
@@ -785,15 +702,8 @@ def get_index_data():
         dict: Endeks fiyatı, EMA20, ve güç durumu
     """
     try:
-        # XU100.IS verisini çek (Finnhub destekliyor mu test edilecek)
-        # Desteklemiyorsa try/except bloğu None dönecektir.
-        full_df = fetch_stock_data("XU100.IS")
-        
-        if full_df is None or full_df.empty:
-            return None
-            
-        # Son 6 ay (yaklaşık 126 işlem günü)
-        hist = full_df.tail(126).copy()
+        ticker = yf.Ticker("XU100.IS")
+        hist = ticker.history(period="6mo")
         
         if hist.empty or len(hist) < 20:
             return None
@@ -933,15 +843,8 @@ def calculate_indicator_confidence_scores(symbol):
         }
     """
     try:
-        # Finnhub'dan veri çek
-        full_df = fetch_stock_data(symbol)
-        
-        if full_df is None or full_df.empty or len(full_df) < 100:
-            return None
-            
-        # Son 1 yıllık veriyi al
-        cutoff_date = full_df.index.max() - pd.Timedelta(days=365)
-        df = full_df[full_df.index >= cutoff_date].copy()
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="1y")
         
         if df.empty or len(df) < 100:
             return None
@@ -2055,8 +1958,8 @@ def optimize_strategy_robust(symbol):
     """
     try:
         # Veriyi burada sadece 1 kere indiriyoruz
-        # Veriyi burada sadece 1 kere indiriyoruz
-        df = fetch_stock_data(symbol)
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="2y")
         
         if df.empty or len(df) < 200:
             return {'atr_multiplier': 2.5, 'take_profit_ratio': 2.0, 'rsi_limit': 75}
@@ -2728,8 +2631,8 @@ with tab_analiz:
             
             # SONRA BU PARAMETRELERLE BACKTEST ÇALIŞTIR
             # run_robust_backtest artık df istiyor, bu yüzden indiriyoruz
-            # run_robust_backtest artık df istiyor, bu yüzden indiriyoruz
-            df_bt = fetch_stock_data(target_symbol.upper().strip())
+            ticker_bt = yf.Ticker(target_symbol.upper().strip())
+            df_bt = ticker_bt.history(period="2y")
             
             backtest_results = run_robust_backtest(
                 df_bt, 
