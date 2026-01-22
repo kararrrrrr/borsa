@@ -2055,8 +2055,8 @@ def optimize_strategy_robust(symbol):
     """
     try:
         # Veriyi burada sadece 1 kere indiriyoruz
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period="2y")
+        # Veriyi burada sadece 1 kere indiriyoruz
+        df = fetch_stock_data(symbol)
         
         if df.empty or len(df) < 200:
             return {'atr_multiplier': 2.5, 'take_profit_ratio': 2.0, 'rsi_limit': 75}
@@ -2728,8 +2728,8 @@ with tab_analiz:
             
             # SONRA BU PARAMETRELERLE BACKTEST ÇALIŞTIR
             # run_robust_backtest artık df istiyor, bu yüzden indiriyoruz
-            ticker_bt = yf.Ticker(target_symbol.upper().strip())
-            df_bt = ticker_bt.history(period="2y")
+            # run_robust_backtest artık df istiyor, bu yüzden indiriyoruz
+            df_bt = fetch_stock_data(target_symbol.upper().strip())
             
             backtest_results = run_robust_backtest(
                 df_bt, 
