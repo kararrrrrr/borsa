@@ -984,7 +984,7 @@ def detect_liquidity_sweep(df, lookback=3):
     return {'is_sweep': False, 'sweep_type': None, 'message': None}
 
 
-def check_structure_break(df, lookback=3):
+def check_structure_break(df, lookback=5):
     """
     Yapı Kontrolü - "Son N günün en düşüğünün altına sarktık mı?"
     
@@ -1121,6 +1121,15 @@ def calculate_wyckoff_score(data, df):
             score += 10
         elif ema50 < ema200 and price < ema50:
             score -= 10
+    
+    # RSI Aşırı Alım Cezası
+    rsi = data.get('rsi', 50)
+    if rsi > 75:
+        score -= 20
+        reasons.append("⚠️ RSI Aşırı Alım (>75)")
+    elif rsi > 70:
+        score -= 10
+        reasons.append("⚠️ RSI Dikkat (>70)")
     
     # Final skor hesaplama
     final_score = base_score + max(-50, min(50, score))
@@ -1413,8 +1422,18 @@ def run_robust_backtest(symbol, atr_mult=3.0, tp_ratio=0, rsi_limit=75):
                     # Yeterli veri yoksa eski sistemi kullan
                     score, _ = calculate_decision_score(row_data, weekly_data=None, rsi_limit=rsi_limit)
                 
-                # ALIM EŞİĞİ
-                if score >= 60:
+                # ─── GİRİŞ FİLTRELERİ ───
+                # 1. TREND FİLTRESİ: EMA50 > EMA200 ve Fiyat > EMA50 olmalı
+                is_bullish_trend = v_ema50[i] > v_ema200[i] and current_close > v_ema50[i]
+                
+                # 2. RSI AŞIRI ALIM KONTROLÜ: RSI 75'in altında olmalı
+                is_not_overbought = v_rsi[i] < 75
+                
+                # 3. HACİM DOĞRULAMASI: Hacim ortalamanın üstünde olmalı
+                has_volume = v_vol_ratio[i] > 0.8
+                
+                # ALIM EŞİĞİ (Tüm filtreler geçmeli)
+                if score >= 60 and is_bullish_trend and is_not_overbought and has_volume:
                     entry_price = v_opens[i+1]
                     current_entry_date = df.index[i+1]
                     size = cash / entry_price
